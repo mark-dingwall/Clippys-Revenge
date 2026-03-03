@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Testing
+.pytest_cache/
+
+# Virtual environment
+.venv/
+
+# Claude Code local settings
+.claude/settings.local.json
+
+# Editor artifacts
+*.swp
+*.swo
+*~
+.DS_Store
