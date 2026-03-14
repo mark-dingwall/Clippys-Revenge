@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import collections
 import math
+import os
 import random
 import sys
 from enum import IntEnum
@@ -22,10 +23,6 @@ from clippy.types import Cell, Color, OutputCells, OutputMessage, PTYUpdate, TTY
 # ---------------------------------------------------------------------------
 
 BURN_DURATION = 60          # ticks a cell burns before charring (~2s @30fps)
-CANCEL_FADE_DURATION = 30   # fast fade on cursor-shake (~1s)
-
-CURSOR_WINDOW = 15          # sliding window size for cursor tracking
-CURSOR_THRESHOLD = 10       # Manhattan distance sum to trigger cancel
 
 SPREAD_PROB_UP = 0.35
 SPREAD_PROB_LATERAL = 0.20
@@ -90,8 +87,7 @@ class Phase(IntEnum):
     SPREADING = 1
     BURNING = 2
     WASTELAND = 3
-    CANCEL_FADING = 4
-    DONE = 5
+    DONE = 4
 
 
 # ---------------------------------------------------------------------------
@@ -192,10 +188,14 @@ _SPREAD_DIRS: list[tuple[int, int, float]] = [
 class FireEffect:
     EFFECT_META = {"name": "fire", "description": "Fire with flow-field smoke wisps"}
 
-    def __init__(self, seed: int | None = None) -> None:
+    def __init__(self, seed: int | None = None, idle_secs: float | None = None) -> None:
         self._rng = random.Random(seed)
+        if idle_secs is None:
+            idle_secs = float(os.environ.get("CLIPPY_INTERVAL", "300"))
+        self._idle_secs = idle_secs
         self._phase = Phase.IDLE
         self._tick_count = 0
+        self._idle_until = -1
         self._width = 0
         self._height = 0
 
@@ -230,13 +230,6 @@ class FireEffect:
         self._flow_rows: int = 0
         self._last_flow_update: int = -FLOW_UPDATE_TICKS  # force update on first tick
 
-        # Cursor-shake tracking
-        self._cursor_history: collections.deque[tuple[int, int]] = collections.deque(
-            maxlen=CURSOR_WINDOW
-        )
-
-        # Phase timing (cancel fade only)
-        self._fade_start_tick = -1
 
     # -- Grid management --------------------------------------------------
 
@@ -336,14 +329,40 @@ class FireEffect:
     def on_pty_update(self, update: PTYUpdate) -> None:
         w, h = update.size
         if self._phase == Phase.IDLE:
-            self._init_grids(w, h)
-            self._ignite_initial()
-            self._phase = Phase.SPREADING
+            self._width = w
+            self._height = h
+            if self._idle_until == -1:
+                self._idle_until = self._tick_count + self._pick_delay()
         elif (w, h) != (self._width, self._height):
             self._handle_resize(w, h)
 
-        # Cursor-shake tracking
-        self._cursor_history.append(update.cursor)
+    def _start_effect(self) -> None:
+        self._init_grids(self._width, self._height)
+        self._ignite_initial()
+        self._phase = Phase.SPREADING
+
+    def _reset_state(self) -> None:
+        self._cell_state = []
+        self._ignition_tick = []
+        self._charred_char = []
+        self._charred_tier = []
+        self._decay_interval = []
+        self._last_decay_tick = []
+        self._heat = []
+        self._frontier = set()
+        self._clear_count = 0
+        self._burning_count = 0
+        self._charred_count = 0
+        self._is_ember = []
+        self._ember_ignition_tick = []
+        self._ember_count = 0
+        self._smoke = []
+        self._smoke_erase = []
+        self._flow_dir = []
+        self._flow_str = []
+
+    def _pick_delay(self) -> int:
+        return round(self._rng.uniform(0.75, 1.25) * self._idle_secs * 30)
 
     def on_resize(self, resize: TTYResize) -> None:
         if self._phase == Phase.IDLE or self._phase == Phase.DONE:
@@ -397,9 +416,7 @@ class FireEffect:
         self._init_flow_field()
 
         # If new CLEAR cells exist during active phases, regress to SPREADING
-        if self._clear_count > 0 and self._phase in (
-            Phase.BURNING, Phase.WASTELAND, Phase.CANCEL_FADING
-        ):
+        if self._clear_count > 0 and self._phase in (Phase.BURNING, Phase.WASTELAND):
             self._phase = Phase.SPREADING
 
     # -- Fire simulation --------------------------------------------------
@@ -708,10 +725,6 @@ class FireEffect:
         return [OutputCells(cells=cells)]
 
     def _get_fade_alpha(self) -> float:
-        """Compute current fade alpha based on phase."""
-        if self._phase == Phase.CANCEL_FADING:
-            elapsed = self._tick_count - self._fade_start_tick
-            return max(0.0, 1.0 - elapsed / CANCEL_FADE_DURATION)
         return 1.0
 
     # -- Phase transitions ------------------------------------------------
@@ -729,25 +742,6 @@ class FireEffect:
             if self._charred_count <= 0 and self._ember_count <= 0 and not self._smoke:
                 self._phase = Phase.DONE
 
-        elif self._phase == Phase.CANCEL_FADING:
-            elapsed = self._tick_count - self._fade_start_tick
-            if elapsed >= CANCEL_FADE_DURATION:
-                self._phase = Phase.DONE
-
-    # -- Cursor-shake detection -------------------------------------------
-
-    def _check_cursor_shake(self) -> bool:
-        """Check if recent cursor movements exceed the shake threshold."""
-        if len(self._cursor_history) < 2:
-            return False
-        total = 0
-        hist = list(self._cursor_history)
-        for i in range(1, len(hist)):
-            dx = abs(hist[i][0] - hist[i - 1][0])
-            dy = abs(hist[i][1] - hist[i - 1][1])
-            total += dx + dy
-        return total >= CURSOR_THRESHOLD
-
     # -- Main tick --------------------------------------------------------
 
     @property
@@ -755,17 +749,18 @@ class FireEffect:
         return self._phase
 
     def tick(self) -> list[OutputMessage]:
-        if self._phase == Phase.IDLE or self._phase == Phase.DONE:
-            return []
-
         self._tick_count += 1
 
-        # Check cursor-shake cancellation
-        if self._phase in (Phase.SPREADING, Phase.BURNING, Phase.WASTELAND):
-            if self._check_cursor_shake():
-                self._phase = Phase.CANCEL_FADING
-                self._fade_start_tick = self._tick_count
-                self._cursor_history.clear()
+        if self._phase == Phase.IDLE:
+            if self._idle_until >= 0 and self._tick_count >= self._idle_until:
+                self._start_effect()
+            return []
+
+        if self._phase == Phase.DONE:
+            self._reset_state()
+            self._idle_until = self._tick_count + self._pick_delay()
+            self._phase = Phase.IDLE
+            return []
 
         # Simulation
         if self._phase == Phase.SPREADING:
@@ -787,11 +782,13 @@ class FireEffect:
         # Visual heat
         self._compute_heat()
 
+        # Render before phase transition (freeze fix)
+        result = self._render()
+
         # Phase transitions
         self._update_phase()
 
-        # Render
-        return self._render()
+        return result
 
 
 if __name__ == "__main__":

@@ -2,8 +2,8 @@
 """Grove effect — grass, flowers, vines, trees, bushes, and birds bloom from the terminal bottom."""
 from __future__ import annotations
 
-import collections
 import math
+import os
 import random
 from dataclasses import dataclass, field
 from enum import IntEnum
@@ -18,9 +18,6 @@ from clippy.types import Cell, Color, OutputCells, OutputMessage, PTYUpdate, TTY
 GROWING_DURATION = 400
 PERCHING_DURATION = 300
 FADE_DURATION = 60
-CANCEL_FADE_DURATION = 30
-CURSOR_WINDOW = 15
-CURSOR_THRESHOLD = 10
 
 GRASS_DENSITY = 0.85
 GRASS_MIN_H = 1
@@ -248,10 +245,14 @@ class _Bird:
 class GroveEffect:
     EFFECT_META = {"name": "grove", "description": "A vibrant grove grows from the terminal bottom"}
 
-    def __init__(self, seed: int | None = None) -> None:
+    def __init__(self, seed: int | None = None, idle_secs: float | None = None) -> None:
         self._rng = random.Random(seed)
+        if idle_secs is None:
+            idle_secs = float(os.environ.get("CLIPPY_INTERVAL", "300"))
+        self._idle_secs = idle_secs
         self._phase = Phase.IDLE
         self._tick_count = 0
+        self._idle_until = -1
         self._width = 0
         self._height = 0
         self._phase_start = 0
@@ -265,10 +266,6 @@ class GroveEffect:
         self._birds: list[_Bird] = []
         self._attached_flowers: list[_Flower] = []
 
-        self._cursor_history: collections.deque[tuple[int, int]] = collections.deque(
-            maxlen=CURSOR_WINDOW
-        )
-
         # Ghost-cell erasure: track positions emitted last frame
         self._prev_render_positions: set[tuple[int, int]] = set()
 
@@ -279,12 +276,30 @@ class GroveEffect:
         if self._phase == Phase.IDLE:
             self._width = w
             self._height = h
-            self._init_scene()
-            self._phase = Phase.GROWING
-            self._phase_start = 0
+            if self._idle_until == -1:
+                self._idle_until = self._tick_count + self._pick_delay()
         elif (w, h) != (self._width, self._height):
             self._handle_resize(w, h)
-        self._cursor_history.append(update.cursor)
+
+    def _start_effect(self) -> None:
+        self._init_scene()
+        self._phase = Phase.GROWING
+        self._phase_start = self._tick_count
+
+    def _reset_state(self) -> None:
+        self._grass = []
+        self._flowers = []
+        self._vines = []
+        self._trees = []
+        self._bushes = []
+        self._birds = []
+        self._attached_flowers = []
+        self._phase_start = 0
+        self._fade_start_tick = -1
+        self._prev_render_positions = set()
+
+    def _pick_delay(self) -> int:
+        return round(self._rng.uniform(0.75, 1.25) * self._idle_secs * 30)
 
     def on_resize(self, resize: TTYResize) -> None:
         if self._phase in (Phase.IDLE, Phase.DONE):
@@ -882,19 +897,6 @@ class GroveEffect:
             if self._get_fade_alpha() <= 0.0:
                 self._phase = Phase.DONE
 
-    # -- Cursor-shake detection ----------------------------------------------
-
-    def _check_cursor_shake(self) -> bool:
-        if len(self._cursor_history) < 2:
-            return False
-        total = 0
-        hist = list(self._cursor_history)
-        for i in range(1, len(hist)):
-            dx = abs(hist[i][0] - hist[i - 1][0])
-            dy = abs(hist[i][1] - hist[i - 1][1])
-            total += dx + dy
-        return total >= CURSOR_THRESHOLD
-
     # -- Main tick -----------------------------------------------------------
 
     @property
@@ -902,17 +904,18 @@ class GroveEffect:
         return self._phase
 
     def tick(self) -> list[OutputMessage]:
-        if self._phase in (Phase.IDLE, Phase.DONE):
-            return []
-
         self._tick_count += 1
 
-        # Cursor-shake -> early fading
-        if self._phase in (Phase.GROWING, Phase.PERCHING):
-            if self._check_cursor_shake():
-                self._phase = Phase.FADING
-                self._fade_start_tick = self._tick_count
-                self._cursor_history.clear()
+        if self._phase == Phase.IDLE:
+            if self._idle_until >= 0 and self._tick_count >= self._idle_until:
+                self._start_effect()
+            return []
+
+        if self._phase == Phase.DONE:
+            self._reset_state()
+            self._idle_until = self._tick_count + self._pick_delay()
+            self._phase = Phase.IDLE
+            return []
 
         # Dispatch simulation
         if self._phase == Phase.GROWING:
@@ -924,8 +927,11 @@ class GroveEffect:
             self._update_vine_chars()
             self._bloom_attached_flowers_tick()
 
+        # Render before phase transition (freeze fix)
+        result = self._render()
+
         self._update_phase()
-        return self._render()
+        return result
 
 
 if __name__ == "__main__":

@@ -58,7 +58,7 @@ SEEDS = [0, 1, 42, 99, 12345]
 @pytest.mark.parametrize("seed", SEEDS)
 def test_coordinates_in_bounds(seed):
     """All pixel coordinates must be within [0, width) x [0, height*2)."""
-    effect = MicrobesEffect(seed=seed)
+    effect = MicrobesEffect(seed=seed, idle_secs=0)
     effect.on_pty_update(make_pty_update(80, 24))
     for _ in range(100):
         if effect.phase == Phase.DONE:
@@ -75,7 +75,7 @@ def test_coordinates_in_bounds(seed):
 @pytest.mark.parametrize("seed", SEEDS)
 def test_colors_in_range(seed):
     """All RGBA components must be in [0.0, 1.0]."""
-    effect = MicrobesEffect(seed=seed)
+    effect = MicrobesEffect(seed=seed, idle_secs=0)
     effect.on_pty_update(make_pty_update(40, 12))
     for _ in range(100):
         outputs = effect.tick()
@@ -93,7 +93,7 @@ def test_colors_in_range(seed):
 @pytest.mark.parametrize("seed", SEEDS)
 def test_output_type(seed):
     """tick() returns list containing only OutputPixels."""
-    effect = MicrobesEffect(seed=seed)
+    effect = MicrobesEffect(seed=seed, idle_secs=0)
     effect.on_pty_update(make_pty_update(40, 12))
     for _ in range(50):
         outputs = effect.tick()
@@ -104,7 +104,7 @@ def test_output_type(seed):
 @pytest.mark.parametrize("seed", SEEDS)
 def test_liveness(seed):
     """At least one non-empty frame in first 10 ticks after PTYUpdate."""
-    effect = MicrobesEffect(seed=seed)
+    effect = MicrobesEffect(seed=seed, idle_secs=0)
     effect.on_pty_update(make_pty_update(80, 24))
     found_output = False
     for _ in range(10):
@@ -118,7 +118,7 @@ def test_liveness(seed):
 @pytest.mark.parametrize("seed", SEEDS)
 def test_eventual_completion(seed):
     """Effect reaches DONE within bounded ticks."""
-    effect = MicrobesEffect(seed=seed)
+    effect = MicrobesEffect(seed=seed, idle_secs=0)
     effect.on_pty_update(make_pty_update(40, 12))
     max_ticks = SWARMING_DURATION + FADE_DURATION + 50
     reached_done = run_to_phase(effect, Phase.DONE, max_ticks=max_ticks)
@@ -131,15 +131,16 @@ def test_eventual_completion(seed):
 
 def test_idle_returns_empty():
     """tick() returns [] before any PTYUpdate."""
-    effect = MicrobesEffect(seed=0)
+    effect = MicrobesEffect(seed=0, idle_secs=0)
     assert effect.tick() == []
     assert effect.phase == Phase.IDLE
 
 
 def test_swarming_on_first_update():
-    """Phase transitions to SWARMING on first PTYUpdate."""
-    effect = MicrobesEffect(seed=0)
+    """Phase transitions to SWARMING after first PTYUpdate + tick."""
+    effect = MicrobesEffect(seed=0, idle_secs=0)
     effect.on_pty_update(make_pty_update(80, 24))
+    effect.tick()  # idle_secs=0: first tick starts effect
     assert effect.phase == Phase.SWARMING
     outputs = effect.tick()
     assert len(outputs) > 0
@@ -147,8 +148,9 @@ def test_swarming_on_first_update():
 
 def test_phases_progress():
     """Phase only moves forward (monotonically increasing)."""
-    effect = MicrobesEffect(seed=42)
+    effect = MicrobesEffect(seed=42, idle_secs=0)
     effect.on_pty_update(make_pty_update(40, 12))
+    effect.tick()  # start effect
     prev_phase = effect.phase
     max_ticks = SWARMING_DURATION + FADE_DURATION + 50
     for _ in range(max_ticks):
@@ -165,7 +167,7 @@ def test_phases_progress():
 
 def test_done_returns_empty():
     """tick() returns [] after full lifecycle."""
-    effect = MicrobesEffect(seed=42)
+    effect = MicrobesEffect(seed=42, idle_secs=0)
     effect.on_pty_update(make_pty_update(40, 12))
     max_ticks = SWARMING_DURATION + FADE_DURATION + 50
     assert run_to_phase(effect, Phase.DONE, max_ticks=max_ticks)
@@ -174,44 +176,12 @@ def test_done_returns_empty():
 
 
 # ---------------------------------------------------------------------------
-# Cursor-shake cancellation
-# ---------------------------------------------------------------------------
-
-def test_cursor_shake_triggers_fading():
-    """Rapid cursor changes trigger FADING."""
-    effect = MicrobesEffect(seed=0)
-    effect.on_pty_update(make_pty_update(80, 24, cursor=(0, 0)))
-    advance(effect, 5)
-    assert effect.phase == Phase.SWARMING
-
-    for i in range(15):
-        x = (i % 2) * 10
-        effect.on_pty_update(make_pty_update(80, 24, cursor=(x, 0)))
-
-    effect.tick()
-    assert effect.phase == Phase.FADING
-
-
-def test_slow_cursor_no_cancel():
-    """Small cursor movements don't trigger cancel."""
-    effect = MicrobesEffect(seed=0)
-    effect.on_pty_update(make_pty_update(80, 24, cursor=(5, 5)))
-    advance(effect, 5)
-
-    for i in range(5):
-        effect.on_pty_update(make_pty_update(80, 24, cursor=(5 + i % 2, 5)))
-
-    advance(effect, 3)
-    assert effect.phase == Phase.SWARMING
-
-
-# ---------------------------------------------------------------------------
 # Resize
 # ---------------------------------------------------------------------------
 
 def test_resize_no_oob():
     """No out-of-bounds coordinates after resize."""
-    effect = MicrobesEffect(seed=42)
+    effect = MicrobesEffect(seed=42, idle_secs=0)
     effect.on_pty_update(make_pty_update(80, 24))
     advance(effect, 20)
 
@@ -232,7 +202,7 @@ def test_resize_no_oob():
 def test_seeded_deterministic():
     """Same seed produces identical first 5 frames."""
     def collect_frames(seed):
-        effect = MicrobesEffect(seed=seed)
+        effect = MicrobesEffect(seed=seed, idle_secs=0)
         effect.on_pty_update(make_pty_update(40, 12))
         frames = []
         for _ in range(5):
@@ -255,9 +225,12 @@ def test_seeded_deterministic():
 
 def test_step_integration():
     """Use harness.step() to drive effect through a few ticks."""
-    effect = MicrobesEffect(seed=0)
+    effect = MicrobesEffect(seed=0, idle_secs=0)
 
-    result = step(effect, [make_pty_json(40, 12)])
+    # First step: PTYUpdate sets idle_until; tick starts effect but returns []
+    step(effect, [make_pty_json(40, 12)])
+
+    result = step(effect, [])
     assert len(result) >= 1
     data = json.loads(result[0])
     assert "output_pixels" in data

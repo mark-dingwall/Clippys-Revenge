@@ -72,7 +72,7 @@ SEEDS = [0, 1, 42, 99, 12345]
 @pytest.mark.parametrize("seed", SEEDS)
 def test_coordinates_in_bounds(seed):
     """All cell coordinates must be within terminal dimensions."""
-    effect = InvadersEffect(seed=seed)
+    effect = InvadersEffect(seed=seed, idle_secs=0)
     effect.on_pty_update(make_pty_update(80, 24))
     for _ in range(200):
         outputs = effect.tick()
@@ -87,7 +87,7 @@ def test_coordinates_in_bounds(seed):
 @pytest.mark.parametrize("seed", SEEDS)
 def test_colors_in_range(seed):
     """All RGBA components must be in [0.0, 1.0]."""
-    effect = InvadersEffect(seed=seed)
+    effect = InvadersEffect(seed=seed, idle_secs=0)
     effect.on_pty_update(make_pty_update(80, 24))
     for _ in range(200):
         outputs = effect.tick()
@@ -106,7 +106,7 @@ def test_colors_in_range(seed):
 @pytest.mark.parametrize("seed", SEEDS)
 def test_output_type(seed):
     """tick() returns list containing only OutputCells."""
-    effect = InvadersEffect(seed=seed)
+    effect = InvadersEffect(seed=seed, idle_secs=0)
     effect.on_pty_update(make_pty_update(80, 24))
     for _ in range(200):
         for out in effect.tick():
@@ -116,7 +116,7 @@ def test_output_type(seed):
 @pytest.mark.parametrize("seed", SEEDS)
 def test_liveness(seed):
     """Non-empty frame within 3 ticks of PTYUpdate."""
-    effect = InvadersEffect(seed=seed)
+    effect = InvadersEffect(seed=seed, idle_secs=0)
     effect.on_pty_update(make_pty_update(80, 24))
     found_output = False
     for _ in range(3):
@@ -129,7 +129,7 @@ def test_liveness(seed):
 @pytest.mark.parametrize("seed", SEEDS)
 def test_eventual_completion(seed):
     """Effect reaches DONE within 3000 ticks on a small terminal."""
-    effect = InvadersEffect(seed=seed)
+    effect = InvadersEffect(seed=seed, idle_secs=0)
     effect.on_pty_update(make_pty_update(20, 8))
     reached_done = run_to_phase(effect, Phase.DONE, max_ticks=3000)
     assert reached_done, (
@@ -143,15 +143,16 @@ def test_eventual_completion(seed):
 
 def test_idle_returns_empty():
     """tick() returns [] before any PTYUpdate."""
-    effect = InvadersEffect(seed=0)
+    effect = InvadersEffect(seed=0, idle_secs=0)
     assert effect.tick() == []
     assert effect.phase == Phase.IDLE
 
 
 def test_bombardment_on_first_update():
-    """Phase is BOMBARDMENT after PTYUpdate; first tick produces output."""
-    effect = InvadersEffect(seed=0)
+    """Phase is BOMBARDMENT after PTYUpdate + first tick; second tick produces output."""
+    effect = InvadersEffect(seed=0, idle_secs=0)
     effect.on_pty_update(make_pty_update(80, 24))
+    effect.tick()  # idle_secs=0: first tick starts effect
     assert effect.phase == Phase.BOMBARDMENT
     outputs = effect.tick()
     assert len(outputs) > 0
@@ -159,7 +160,7 @@ def test_bombardment_on_first_update():
 
 def test_phases_monotonic():
     """Phase value never decreases (IDLE < BOMBARDMENT < ACTIVE < FADING < DONE)."""
-    effect = InvadersEffect(seed=42)
+    effect = InvadersEffect(seed=42, idle_secs=0)
     effect.on_pty_update(make_pty_update(20, 8))
     prev_phase = effect.phase
     for _ in range(500):
@@ -175,7 +176,7 @@ def test_phases_monotonic():
 
 def test_done_returns_empty():
     """tick() returns [] after DONE phase."""
-    effect = InvadersEffect(seed=42)
+    effect = InvadersEffect(seed=42, idle_secs=0)
     effect.on_pty_update(make_pty_update(20, 8))
     assert run_to_phase(effect, Phase.DONE, max_ticks=3000)
     assert effect.tick() == []
@@ -188,7 +189,7 @@ def test_done_returns_empty():
 
 def test_top_zone_cleared():
     """Rubble accumulates in the top zone during bombardment (no solid overlay)."""
-    effect = InvadersEffect(seed=0)
+    effect = InvadersEffect(seed=0, idle_secs=0)
     effect.on_pty_update(make_pty_update(80, 24))
     top_zone_height = effect._top_zone_height
     # Run enough ticks for bombs to spawn (every BOMBARDMENT_BOMB_RATE ticks) and detonate
@@ -211,7 +212,7 @@ def test_rubble_only_in_code_zone():
     Bombardment rubble intentionally spans the whole screen and fades out;
     we skip the check while _bombard_rubble is still present.
     """
-    effect = InvadersEffect(seed=0)
+    effect = InvadersEffect(seed=0, idle_secs=0)
     effect.on_pty_update(make_pty_update(80, 24))
     code_zone_start = effect._code_zone_start
 
@@ -232,7 +233,7 @@ def test_rubble_only_in_code_zone():
 
 def test_bombs_in_bounds():
     """Yellow (bomb) cells always have valid coordinates."""
-    effect = InvadersEffect(seed=0)
+    effect = InvadersEffect(seed=0, idle_secs=0)
     effect.on_pty_update(make_pty_update(80, 24))
     for _ in range(250):
         for out in effect.tick():
@@ -246,7 +247,7 @@ def test_bombs_in_bounds():
 
 def test_alien_cells_in_top_zone():
     """Alien cells only appear at y < code_zone_start during ACTIVE phase."""
-    effect = InvadersEffect(seed=0)
+    effect = InvadersEffect(seed=0, idle_secs=0)
     effect.on_pty_update(make_pty_update(80, 24))
     assert run_to_phase(effect, Phase.ACTIVE, max_ticks=500), "Never reached ACTIVE"
     code_zone_start = effect._code_zone_start
@@ -265,7 +266,7 @@ def test_alien_cells_in_top_zone():
 
 def test_fading_alpha_decreases():
     """Once FADING, cells have alpha < 1.0; eventually transitions to DONE."""
-    effect = InvadersEffect(seed=0)
+    effect = InvadersEffect(seed=0, idle_secs=0)
     effect.on_pty_update(make_pty_update(20, 8))
 
     # Advance to FADING
@@ -306,7 +307,7 @@ def test_sprite_symmetry():
 
 def test_flung_chars_in_bounds():
     """Flung characters (text debris from mid-screen bomb hits) stay in bounds."""
-    effect = InvadersEffect(seed=0)
+    effect = InvadersEffect(seed=0, idle_secs=0)
     effect.on_pty_update(make_pty_update(80, 24))
 
     # Seed the code zone with PTY text so bombs have content to fling
@@ -333,7 +334,7 @@ def test_flung_chars_in_bounds():
 
 def test_resize_no_oob():
     """No out-of-bounds coordinates after shrinking the terminal."""
-    effect = InvadersEffect(seed=42)
+    effect = InvadersEffect(seed=42, idle_secs=0)
     effect.on_pty_update(make_pty_update(40, 12))
     advance(effect, 20)
 
@@ -348,8 +349,9 @@ def test_resize_no_oob():
 
 def test_resize_prunes_rubble():
     """Rubble outside new bounds is dropped after resize."""
-    effect = InvadersEffect(seed=42)
+    effect = InvadersEffect(seed=42, idle_secs=0)
     effect.on_pty_update(make_pty_update(80, 24))
+    effect.tick()  # start effect (needed so on_resize isn't skipped for IDLE)
 
     # Manually inject some rubble outside the future new bounds
     effect._rubble[(60, 20)] = "#"
@@ -371,7 +373,7 @@ def test_resize_prunes_rubble():
 def test_seeded_deterministic():
     """Same seed produces identical first 5 frames."""
     def collect_frames(seed):
-        effect = InvadersEffect(seed=seed)
+        effect = InvadersEffect(seed=seed, idle_secs=0)
         effect.on_pty_update(make_pty_update(80, 24))
         frames = []
         for _ in range(5):
@@ -399,7 +401,7 @@ def test_seeded_deterministic():
 
 def test_step_integration():
     """harness.step() returns output_cells as a direct array (not nested object)."""
-    effect = InvadersEffect(seed=0)
+    effect = InvadersEffect(seed=0, idle_secs=0)
 
     # First step triggers PTY update + one tick; advance until bombs spawn so output is non-empty
     result = step(effect, [make_pty_json(80, 24)])
@@ -427,7 +429,7 @@ def test_step_integration():
 
 def test_bombardment_flings_chars():
     """Bombardment detonations eject flung chars (same as active-phase bombs)."""
-    effect = InvadersEffect(seed=0)
+    effect = InvadersEffect(seed=0, idle_secs=0)
     effect.on_pty_update(make_pty_update(80, 24))
     # Seed PTY content throughout top zone so detonate() has chars to fling
     for y in range(effect._top_zone_height):
@@ -441,7 +443,7 @@ def test_bombardment_flings_chars():
 
 def test_defender_shots_appear():
     """White defender shot cells appear during ACTIVE phase."""
-    effect = InvadersEffect(seed=7)
+    effect = InvadersEffect(seed=7, idle_secs=0)
     effect.on_pty_update(make_pty_update(80, 24))
     assert run_to_phase(effect, Phase.ACTIVE, max_ticks=500), "Never reached ACTIVE"
     found = False
@@ -457,7 +459,7 @@ def test_defender_shots_appear():
 
 def test_defender_shot_kills_alien():
     """A defender shot that overlaps an alien removes it and records an AlienKill."""
-    effect = InvadersEffect(seed=0)
+    effect = InvadersEffect(seed=0, idle_secs=0)
     effect.on_pty_update(make_pty_update(80, 24))
     assert run_to_phase(effect, Phase.ACTIVE, max_ticks=500), "Never reached ACTIVE"
     # Clear existing state and plant a single alien at a known location
@@ -482,7 +484,7 @@ def test_defender_shot_kills_alien():
 
 def test_alien_kill_fireball_renders():
     """An injected AlienKill produces green fireball cells in the output."""
-    effect = InvadersEffect(seed=0)
+    effect = InvadersEffect(seed=0, idle_secs=0)
     effect.on_pty_update(make_pty_update(80, 24))
     assert run_to_phase(effect, Phase.ACTIVE, max_ticks=500), "Never reached ACTIVE"
     effect._alien_kills = [_AlienKill(x=40, y=4, born_tick=effect._tick_count)]
@@ -499,7 +501,7 @@ def test_alien_kill_fireball_renders():
 
 def test_defender_shots_in_bounds():
     """All cells produced during ACTIVE phase have valid coordinates."""
-    effect = InvadersEffect(seed=3)
+    effect = InvadersEffect(seed=3, idle_secs=0)
     effect.on_pty_update(make_pty_update(80, 24))
     run_to_phase(effect, Phase.ACTIVE, max_ticks=500)
     for _ in range(200):

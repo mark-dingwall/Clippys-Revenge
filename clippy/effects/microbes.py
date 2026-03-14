@@ -7,8 +7,8 @@ as pixels with fading trails.
 """
 from __future__ import annotations
 
-import collections
 import math
+import os
 import random
 from dataclasses import dataclass, field
 from enum import IntEnum
@@ -23,10 +23,6 @@ from clippy.types import Color, OutputMessage, OutputPixels, PTYUpdate, Pixel, T
 DOT_COUNT = 80
 SWARMING_DURATION = 300   # ~10s @30fps
 FADE_DURATION = 60        # ~2s
-CANCEL_FADE_DURATION = 30 # ~1s (cursor-shake)
-
-CURSOR_WINDOW = 15
-CURSOR_THRESHOLD = 10
 
 # Dash timing
 MIN_WAIT = 0
@@ -134,10 +130,14 @@ class _Microbe:
 class MicrobesEffect:
     EFFECT_META = {"name": "microbes", "description": "Colorful microbes dashing along curved paths"}
 
-    def __init__(self, seed: int | None = None) -> None:
+    def __init__(self, seed: int | None = None, idle_secs: float | None = None) -> None:
         self._rng = random.Random(seed)
+        if idle_secs is None:
+            idle_secs = float(os.environ.get("CLIPPY_INTERVAL", "300"))
+        self._idle_secs = idle_secs
         self._phase = Phase.IDLE
         self._tick_count = 0
+        self._idle_until = -1
         self._width = 0
         self._height = 0
         self._px_height = 0  # height * 2 (pixel space)
@@ -145,11 +145,6 @@ class MicrobesEffect:
         self._microbes: list[_Microbe] = []
         self._swarming_start = 0
         self._fade_start_tick = 0
-
-        # Cursor-shake tracking
-        self._cursor_history: collections.deque[tuple[int, int]] = collections.deque(
-            maxlen=CURSOR_WINDOW
-        )
 
         # Ghost erasure
         self._prev_render_positions: set[tuple[int, int]] = set()
@@ -331,6 +326,23 @@ class MicrobesEffect:
             m.ease_out = True
             m.next_dash = 0
 
+    # -- Scheduling -----------------------------------------------------------
+
+    def _start_effect(self) -> None:
+        self._init_microbes()
+        self._apply_explode()
+        self._swarming_start = self._tick_count
+        self._phase = Phase.SWARMING
+
+    def _reset_state(self) -> None:
+        self._microbes = []
+        self._swarming_start = 0
+        self._fade_start_tick = 0
+        self._prev_render_positions = set()
+
+    def _pick_delay(self) -> int:
+        return round(self._rng.uniform(0.75, 1.25) * self._idle_secs * 30)
+
     # -- Protocol callbacks ---------------------------------------------------
 
     def on_pty_update(self, update: PTYUpdate) -> None:
@@ -339,14 +351,10 @@ class MicrobesEffect:
             self._width = w
             self._height = h
             self._px_height = h * 2
-            self._init_microbes()
-            self._apply_explode()
-            self._swarming_start = self._tick_count
-            self._phase = Phase.SWARMING
+            if self._idle_until == -1:
+                self._idle_until = self._tick_count + self._pick_delay()
         elif (w, h) != (self._width, self._height):
             self._handle_resize(w, h)
-
-        self._cursor_history.append(update.cursor)
 
     def on_resize(self, resize: TTYResize) -> None:
         if self._phase in (Phase.IDLE, Phase.DONE):
@@ -375,19 +383,6 @@ class MicrobesEffect:
                  max(0.0, min(float(self._px_height - 1), ty)))
                 for tx, ty in m.trail
             ]
-
-    # -- Cursor-shake detection -----------------------------------------------
-
-    def _check_cursor_shake(self) -> bool:
-        if len(self._cursor_history) < 2:
-            return False
-        total = 0
-        hist = list(self._cursor_history)
-        for i in range(1, len(hist)):
-            dx = abs(hist[i][0] - hist[i - 1][0])
-            dy = abs(hist[i][1] - hist[i - 1][1])
-            total += dx + dy
-        return total >= CURSOR_THRESHOLD
 
     # -- Rendering ------------------------------------------------------------
 
@@ -459,26 +454,30 @@ class MicrobesEffect:
         return self._phase
 
     def tick(self) -> list[OutputMessage]:
-        if self._phase in (Phase.IDLE, Phase.DONE):
-            return []
-
         self._tick_count += 1
 
-        # Check cursor-shake cancellation
-        if self._phase == Phase.SWARMING:
-            if self._check_cursor_shake():
-                self._phase = Phase.FADING
-                self._fade_start_tick = self._tick_count
-                self._cursor_history.clear()
+        if self._phase == Phase.IDLE:
+            if self._idle_until >= 0 and self._tick_count >= self._idle_until:
+                self._start_effect()
+            return []
+
+        if self._phase == Phase.DONE:
+            self._reset_state()
+            self._idle_until = self._tick_count + self._pick_delay()
+            self._phase = Phase.IDLE
+            return []
 
         # Update microbes
         for m in self._microbes:
             self._update_microbe(m)
 
+        # Render before phase transition (freeze fix: last fading frame erases cleanly)
+        result = self._render()
+
         # Phase transitions
         self._update_phase()
 
-        return self._render()
+        return result
 
 
 if __name__ == "__main__":

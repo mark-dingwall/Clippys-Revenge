@@ -7,6 +7,7 @@ blast rubble into the code zone. When ~65% of the code zone is rubbled the effec
 """
 from __future__ import annotations
 
+import os
 import random
 from dataclasses import dataclass
 from enum import IntEnum
@@ -195,10 +196,14 @@ class InvadersEffect:
         "description": "Alien invaders blast your code to rubble",
     }
 
-    def __init__(self, seed: int | None = None) -> None:
+    def __init__(self, seed: int | None = None, idle_secs: float | None = None) -> None:
         self._rng = random.Random(seed)
+        if idle_secs is None:
+            idle_secs = float(os.environ.get("CLIPPY_INTERVAL", "300"))
+        self._idle_secs = idle_secs
         self._phase = Phase.IDLE
         self._tick_count = 0
+        self._idle_until = -1
 
         # Terminal dimensions
         self._width = 0
@@ -284,10 +289,8 @@ class InvadersEffect:
         if self._phase == Phase.IDLE:
             self._width, self._height = w, h
             self._compute_zones(w, h)
-            self._gen_sprite_designs()
-            self._lane_last_exit = [0] * self._num_lanes
-            self._bombardment_start = 0  # tick_count is 0 at this point
-            self._phase = Phase.BOMBARDMENT
+            if self._idle_until == -1:
+                self._idle_until = self._tick_count + self._pick_delay()
         elif (w, h) != (self._width, self._height):
             self._handle_resize(w, h)
         # Always track PTY cell content for mid-screen bomb detonation
@@ -364,6 +367,36 @@ class InvadersEffect:
             k for k in self._alien_kills
             if 0 <= k.x < new_w and 0 <= k.y < new_h
         ]
+
+    # -- Scheduling -----------------------------------------------------------
+
+    def _start_effect(self) -> None:
+        self._gen_sprite_designs()
+        self._lane_last_exit = [0] * self._num_lanes
+        self._bombardment_start = self._tick_count
+        self._phase = Phase.BOMBARDMENT
+
+    def _reset_state(self) -> None:
+        self._bombard_bombs = []
+        self._bombs = []
+        self._bomb_timer = 0
+        self._explosions = []
+        self._rubble = {}
+        self._rubble_count = 0
+        self._bombard_rubble = {}
+        self._pty_cells = {}
+        self._flung = []
+        self._defender_shots = []
+        self._alien_kills = []
+        self._aliens = []
+        self._lane_last_exit = []
+        self._march_timer = 0
+        self._prev_render_positions = set()
+        self._fade_start_tick = 0
+        self._top_fade_start = 0
+
+    def _pick_delay(self) -> int:
+        return round(self._rng.uniform(0.75, 1.25) * self._idle_secs * 30)
 
     # -- Phase helpers --------------------------------------------------------
 
@@ -764,10 +797,18 @@ class InvadersEffect:
         return self._phase
 
     def tick(self) -> list[OutputMessage]:
-        if self._phase in (Phase.IDLE, Phase.DONE):
+        self._tick_count += 1
+
+        if self._phase == Phase.IDLE:
+            if self._idle_until >= 0 and self._tick_count >= self._idle_until:
+                self._start_effect()
             return []
 
-        self._tick_count += 1
+        if self._phase == Phase.DONE:
+            self._reset_state()
+            self._idle_until = self._tick_count + self._pick_delay()
+            self._phase = Phase.IDLE
+            return []
 
         if self._phase == Phase.BOMBARDMENT:
             self._bomb_timer += 1
@@ -796,8 +837,9 @@ class InvadersEffect:
 
         elif self._phase == Phase.FADING:
             if self._fade_alpha() <= 0.0:
+                result = self._render_active()  # final ghost-erase at alpha=0
                 self._phase = Phase.DONE
-                return []
+                return result
             return self._render_active()
 
         return []

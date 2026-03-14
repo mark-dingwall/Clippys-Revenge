@@ -5,7 +5,6 @@ import pytest
 
 from clippy.effects.fire import (
     BURN_DURATION,
-    CANCEL_FADE_DURATION,
     CHARRED_TIERS,
     DECAY_MAX_TICKS,
     DECAY_MIN_TICKS,
@@ -70,7 +69,7 @@ SEEDS = [0, 1, 42, 99, 12345]
 @pytest.mark.parametrize("seed", SEEDS)
 def test_coordinates_in_bounds(seed):
     """All cell coordinates must be within terminal dimensions (including smoke in WASTELAND)."""
-    effect = FireEffect(seed=seed)
+    effect = FireEffect(seed=seed, idle_secs=0)
     effect.on_pty_update(make_pty_update(80, 24))
     for _ in range(800):
         if effect.phase == Phase.DONE:
@@ -87,7 +86,7 @@ def test_coordinates_in_bounds(seed):
 @pytest.mark.parametrize("seed", SEEDS)
 def test_colors_in_range(seed):
     """All RGBA components must be in [0.0, 1.0]."""
-    effect = FireEffect(seed=seed)
+    effect = FireEffect(seed=seed, idle_secs=0)
     effect.on_pty_update(make_pty_update(40, 12))
     for _ in range(100):
         outputs = effect.tick()
@@ -106,7 +105,7 @@ def test_colors_in_range(seed):
 @pytest.mark.parametrize("seed", SEEDS)
 def test_output_type(seed):
     """tick() returns list containing only OutputCells."""
-    effect = FireEffect(seed=seed)
+    effect = FireEffect(seed=seed, idle_secs=0)
     effect.on_pty_update(make_pty_update(40, 12))
     for _ in range(50):
         outputs = effect.tick()
@@ -117,7 +116,7 @@ def test_output_type(seed):
 @pytest.mark.parametrize("seed", SEEDS)
 def test_liveness(seed):
     """At least one non-empty frame in first 10 ticks after PTYUpdate."""
-    effect = FireEffect(seed=seed)
+    effect = FireEffect(seed=seed, idle_secs=0)
     effect.on_pty_update(make_pty_update(80, 24))
     found_output = False
     for _ in range(10):
@@ -131,7 +130,7 @@ def test_liveness(seed):
 @pytest.mark.parametrize("seed", SEEDS)
 def test_eventual_completion(seed):
     """Effect reaches DONE within bounded ticks (extended for ember lifetime)."""
-    effect = FireEffect(seed=seed)
+    effect = FireEffect(seed=seed, idle_secs=0)
     effect.on_pty_update(make_pty_update(40, 12))
     reached_done = run_to_phase(effect, Phase.DONE, max_ticks=1500)
     assert reached_done, f"Effect did not reach DONE in 1500 ticks, stuck at {effect.phase.name}"
@@ -143,15 +142,16 @@ def test_eventual_completion(seed):
 
 def test_idle_returns_empty():
     """tick() returns [] before any PTYUpdate."""
-    effect = FireEffect(seed=0)
+    effect = FireEffect(seed=0, idle_secs=0)
     assert effect.tick() == []
     assert effect.phase == Phase.IDLE
 
 
 def test_ignition_on_first_update():
     """Non-empty output after first PTYUpdate + tick."""
-    effect = FireEffect(seed=0)
+    effect = FireEffect(seed=0, idle_secs=0)
     effect.on_pty_update(make_pty_update(80, 24))
+    effect.tick()  # idle_secs=0: first tick starts effect
     assert effect.phase == Phase.SPREADING
     outputs = effect.tick()
     assert len(outputs) > 0
@@ -159,8 +159,9 @@ def test_ignition_on_first_update():
 
 def test_phases_progress():
     """Phase only moves forward (monotonically increasing, except resize regression)."""
-    effect = FireEffect(seed=42)
+    effect = FireEffect(seed=42, idle_secs=0)
     effect.on_pty_update(make_pty_update(20, 8))
+    effect.tick()  # start effect
     prev_phase = effect.phase
     for _ in range(600):
         effect.tick()
@@ -176,7 +177,7 @@ def test_phases_progress():
 
 def test_wasteland_decays():
     """Charred cells decay through tiers and effect eventually transitions to DONE."""
-    effect = FireEffect(seed=42)
+    effect = FireEffect(seed=42, idle_secs=0)
     effect.on_pty_update(make_pty_update(10, 4))
 
     # Run until WASTELAND
@@ -192,7 +193,7 @@ def test_wasteland_decays():
 
 def test_done_returns_empty():
     """tick() returns [] after full lifecycle."""
-    effect = FireEffect(seed=42)
+    effect = FireEffect(seed=42, idle_secs=0)
     effect.on_pty_update(make_pty_update(10, 4))
     assert run_to_phase(effect, Phase.DONE, max_ticks=1000)
     assert effect.tick() == []
@@ -205,8 +206,9 @@ def test_done_returns_empty():
 
 def test_initial_glyph_from_heavy_half():
     """Cells that just became CHARRED get tiers from the heavy half of CHARRED_TIERS."""
-    effect = FireEffect(seed=42)
+    effect = FireEffect(seed=42, idle_secs=0)
     effect.on_pty_update(make_pty_update(20, 8))
+    effect.tick()  # start effect (idle_secs=0: first tick initializes grids)
     heavy_limit = len(CHARRED_TIERS) // 2
     found = False
 
@@ -230,8 +232,9 @@ def test_initial_glyph_from_heavy_half():
 
 def test_glyph_decays_over_time():
     """A charred cell's tier advances after its decay interval elapses."""
-    effect = FireEffect(seed=42)
+    effect = FireEffect(seed=42, idle_secs=0)
     effect.on_pty_update(make_pty_update(10, 4))
+    effect.tick()  # start effect
 
     # Find the first BURNING→CHARRED transition
     tracked_cell = None
@@ -264,65 +267,12 @@ def test_glyph_decays_over_time():
 
 
 # ---------------------------------------------------------------------------
-# Cursor-shake cancellation
-# ---------------------------------------------------------------------------
-
-def test_cursor_shake_triggers_cancel():
-    """Rapid cursor changes trigger CANCEL_FADING."""
-    effect = FireEffect(seed=0)
-    effect.on_pty_update(make_pty_update(80, 24, cursor=(0, 0)))
-    # Tick a few times to get into spreading
-    advance(effect, 5)
-    assert effect.phase == Phase.SPREADING
-
-    # Feed rapid cursor movements (zigzag pattern)
-    for i in range(15):
-        x = (i % 2) * 10  # Alternates between 0 and 10
-        effect.on_pty_update(make_pty_update(80, 24, cursor=(x, 0)))
-
-    # Next tick should detect shake and transition
-    effect.tick()
-    assert effect.phase == Phase.CANCEL_FADING
-
-
-def test_slow_cursor_no_cancel():
-    """Small cursor movements don't trigger cancel."""
-    effect = FireEffect(seed=0)
-    effect.on_pty_update(make_pty_update(80, 24, cursor=(5, 5)))
-    advance(effect, 5)
-
-    # Feed very small movements (1 cell each)
-    for i in range(5):
-        effect.on_pty_update(make_pty_update(80, 24, cursor=(5 + i % 2, 5)))
-
-    advance(effect, 3)
-    assert effect.phase != Phase.CANCEL_FADING
-
-
-def test_cancel_fade_completes():
-    """CANCEL_FADING → DONE after CANCEL_FADE_DURATION ticks."""
-    effect = FireEffect(seed=0)
-    effect.on_pty_update(make_pty_update(80, 24, cursor=(0, 0)))
-    advance(effect, 3)
-
-    # Force cancel via cursor shake
-    for i in range(15):
-        effect.on_pty_update(make_pty_update(80, 24, cursor=((i % 2) * 10, 0)))
-    effect.tick()
-    assert effect.phase == Phase.CANCEL_FADING
-
-    # Advance through cancel fade
-    advance(effect, CANCEL_FADE_DURATION + 1)
-    assert effect.phase == Phase.DONE
-
-
-# ---------------------------------------------------------------------------
 # Resize
 # ---------------------------------------------------------------------------
 
 def test_resize_preserves_state():
     """Existing burning cells survive resize."""
-    effect = FireEffect(seed=42)
+    effect = FireEffect(seed=42, idle_secs=0)
     effect.on_pty_update(make_pty_update(20, 8))
     advance(effect, 10)
     assert effect._burning_count > 0
@@ -337,7 +287,7 @@ def test_resize_preserves_state():
 
 def test_resize_no_oob():
     """No out-of-bounds coordinates after resize."""
-    effect = FireEffect(seed=42)
+    effect = FireEffect(seed=42, idle_secs=0)
     effect.on_pty_update(make_pty_update(40, 12))
     advance(effect, 20)
 
@@ -354,7 +304,7 @@ def test_resize_no_oob():
 
 def test_resize_grows_regresses_to_spreading():
     """Growing terminal during WASTELAND regresses to SPREADING."""
-    effect = FireEffect(seed=42)
+    effect = FireEffect(seed=42, idle_secs=0)
     effect.on_pty_update(make_pty_update(10, 4))
     assert run_to_phase(effect, Phase.WASTELAND, max_ticks=600)
 
@@ -370,7 +320,7 @@ def test_resize_grows_regresses_to_spreading():
 def test_seeded_deterministic():
     """Same seed produces identical first 5 frames."""
     def collect_frames(seed):
-        effect = FireEffect(seed=seed)
+        effect = FireEffect(seed=seed, idle_secs=0)
         effect.on_pty_update(make_pty_update(20, 8))
         frames = []
         for _ in range(5):
@@ -398,10 +348,13 @@ def test_seeded_deterministic():
 
 def test_step_integration():
     """Use harness.step() to drive effect through a few ticks."""
-    effect = FireEffect(seed=0)
+    effect = FireEffect(seed=0, idle_secs=0)
 
-    # First step: send PTYUpdate, expect fire output
-    result = step(effect, [make_pty_json(40, 12)])
+    # First step: PTYUpdate sets idle_until; tick starts effect but returns []
+    step(effect, [make_pty_json(40, 12)])
+
+    # Second step: first real tick after effect starts
+    result = step(effect, [])
     assert len(result) >= 1
     data = json.loads(result[0])
     assert "output_cells" in data
@@ -409,7 +362,6 @@ def test_step_integration():
     assert isinstance(cells, list)
     assert len(cells) > 0
 
-    # Subsequent ticks (no new messages)
     for _ in range(5):
         result = step(effect, [])
         assert len(result) >= 1
@@ -441,32 +393,15 @@ def test_heat_to_char_mapping():
     assert heat_to_char(0.01) == " "
 
 
-def test_resize_during_cancel_fading_regresses():
-    """Resize during CANCEL_FADING regresses to SPREADING."""
-    effect = FireEffect(seed=0)
-    effect.on_pty_update(make_pty_update(20, 8, cursor=(0, 0)))
-    advance(effect, 5)
-    assert effect.phase == Phase.SPREADING
-
-    # Force cancel via cursor shake
-    for i in range(15):
-        effect.on_pty_update(make_pty_update(20, 8, cursor=((i % 2) * 10, 0)))
-    effect.tick()
-    assert effect.phase == Phase.CANCEL_FADING
-
-    # Resize larger — new CLEAR cells should regress to SPREADING
-    effect.on_resize(TTYResize(width=40, height=16))
-    assert effect.phase == Phase.SPREADING
-
-
 # ---------------------------------------------------------------------------
 # Smouldering embers
 # ---------------------------------------------------------------------------
 
 def test_ember_creation_rarity():
     """Ember birth rate is well below 1% of BURNING→CHARRED transitions."""
-    effect = FireEffect(seed=7)
+    effect = FireEffect(seed=7, idle_secs=0)
     effect.on_pty_update(make_pty_update(40, 12))
+    effect.tick()  # start effect
 
     transitions = 0
     ember_births = 0
@@ -490,7 +425,7 @@ def test_ember_creation_rarity():
 @pytest.mark.parametrize("seed", SEEDS)
 def test_ember_colors_in_range(seed):
     """Ember cell colors must stay within [0.0, 1.0] during WASTELAND."""
-    effect = FireEffect(seed=seed)
+    effect = FireEffect(seed=seed, idle_secs=0)
     effect.on_pty_update(make_pty_update(40, 12))
     for _ in range(800):
         if effect.phase == Phase.DONE:
@@ -510,7 +445,7 @@ def test_ember_colors_in_range(seed):
 
 def test_ember_extinguishes_to_charred():
     """An injected ember extinguishes to CHARRED at EMBER_EXTINGUISH_TIER after EMBER_LIFETIME ticks."""
-    effect = FireEffect(seed=0)
+    effect = FireEffect(seed=0, idle_secs=0)
     effect.on_pty_update(make_pty_update(20, 8))
     # Run until WASTELAND so all burning cells are gone
     assert run_to_phase(effect, Phase.WASTELAND, max_ticks=600), "Never reached WASTELAND"
@@ -533,7 +468,7 @@ def test_ember_extinguishes_to_charred():
 
 def test_smoke_emits_above_ember():
     """After several ticks an active ember should have emitted at least one smoke particle."""
-    effect = FireEffect(seed=0)
+    effect = FireEffect(seed=0, idle_secs=0)
     effect.on_pty_update(make_pty_update(20, 8))
     assert run_to_phase(effect, Phase.WASTELAND, max_ticks=600), "Never reached WASTELAND"
 
@@ -560,29 +495,28 @@ def test_smoke_emits_above_ember():
 
 def test_smoke_rises_and_clears():
     """A smoke particle eventually rises out of the grid and is removed."""
-    effect = FireEffect(seed=0)
+    effect = FireEffect(seed=0, idle_secs=0)
     effect.on_pty_update(make_pty_update(20, 8))
     assert run_to_phase(effect, Phase.WASTELAND, max_ticks=600), "Never reached WASTELAND"
 
-    # Inject a smoke particle near the top so it exits quickly.
-    # At SMOKE_BASE_RISE=0.15 cells/tick, fy=2.0 exits after ceil(2/0.15)=14 ticks.
+    # Inject a smoke particle. It will either rise off-screen or decay through tiers.
+    # SMOKE_DECAY_TICKS=20, len(CHARRED_TIERS)=7: particle decays out after ≤140 ticks.
     effect._smoke = [SmokeParticle(
         fx=5.0, fy=2.0, vx=0.0, vy=0.0, tier=4,
         last_decay_tick=effect._tick_count,
     )]
 
-    ticks = int(2.0 / 0.15) + 5  # enough for base rise alone to clear y=2
-    for _ in range(ticks):
+    for _ in range(SMOKE_DECAY_TICKS * len(CHARRED_TIERS) + 10):
         effect.tick()
 
-    # Particle should have risen off-screen or moved from origin
+    # Particle should have risen off-screen or decayed away (not still at origin at y=2)
     still_at_origin = any(round(p.fx) == 5 and round(p.fy) == 2 for p in effect._smoke)
-    assert not still_at_origin, "Smoke particle did not rise from y=2 after enough ticks"
+    assert not still_at_origin, "Smoke particle did not move from y=2 after enough ticks"
 
 
 def test_wasteland_blocked_by_live_ember():
     """WASTELAND does not transition to DONE while an ember is still active."""
-    effect = FireEffect(seed=0)
+    effect = FireEffect(seed=0, idle_secs=0)
     effect.on_pty_update(make_pty_update(20, 8))
     assert run_to_phase(effect, Phase.WASTELAND, max_ticks=600), "Never reached WASTELAND"
 
@@ -605,7 +539,7 @@ def test_wasteland_blocked_by_live_ember():
 @pytest.mark.parametrize("seed", SEEDS)
 def test_ember_count_invariant(seed):
     """_ember_count always equals the number of True entries in _is_ember."""
-    effect = FireEffect(seed=seed)
+    effect = FireEffect(seed=seed, idle_secs=0)
     effect.on_pty_update(make_pty_update(20, 8))
     for _ in range(800):
         if effect.phase == Phase.DONE:

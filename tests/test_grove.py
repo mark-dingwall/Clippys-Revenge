@@ -57,7 +57,7 @@ SEEDS = [0, 1, 42, 99, 12345]
 @pytest.mark.parametrize("seed", SEEDS)
 def test_coordinates_in_bounds(seed):
     """All cell coordinates must be within [0, width) x [0, height)."""
-    effect = GroveEffect(seed=seed)
+    effect = GroveEffect(seed=seed, idle_secs=0)
     effect.on_pty_update(make_pty_update(80, 24))
     for _ in range(500):
         if effect.phase == Phase.DONE:
@@ -74,7 +74,7 @@ def test_coordinates_in_bounds(seed):
 @pytest.mark.parametrize("seed", SEEDS)
 def test_colors_in_range(seed):
     """All RGBA components must be in [0.0, 1.0]."""
-    effect = GroveEffect(seed=seed)
+    effect = GroveEffect(seed=seed, idle_secs=0)
     effect.on_pty_update(make_pty_update(40, 12))
     for _ in range(200):
         if effect.phase == Phase.DONE:
@@ -98,7 +98,7 @@ def test_colors_in_range(seed):
 @pytest.mark.parametrize("seed", SEEDS)
 def test_output_type(seed):
     """tick() returns list containing only OutputCells."""
-    effect = GroveEffect(seed=seed)
+    effect = GroveEffect(seed=seed, idle_secs=0)
     effect.on_pty_update(make_pty_update(40, 12))
     for _ in range(50):
         outputs = effect.tick()
@@ -109,7 +109,7 @@ def test_output_type(seed):
 @pytest.mark.parametrize("seed", SEEDS)
 def test_liveness(seed):
     """At least one non-empty frame within first 15 ticks after PTYUpdate."""
-    effect = GroveEffect(seed=seed)
+    effect = GroveEffect(seed=seed, idle_secs=0)
     effect.on_pty_update(make_pty_update(80, 24))
     found_output = False
     for _ in range(15):
@@ -126,15 +126,16 @@ def test_liveness(seed):
 
 def test_idle_returns_empty():
     """tick() returns [] before any PTYUpdate."""
-    effect = GroveEffect(seed=0)
+    effect = GroveEffect(seed=0, idle_secs=0)
     assert effect.tick() == []
     assert effect.phase == Phase.IDLE
 
 
 def test_growing_on_first_update():
-    """Phase transitions to GROWING on first PTYUpdate."""
-    effect = GroveEffect(seed=0)
+    """Phase transitions to GROWING after first PTYUpdate + tick."""
+    effect = GroveEffect(seed=0, idle_secs=0)
     effect.on_pty_update(make_pty_update(80, 24))
+    effect.tick()  # idle_secs=0: first tick starts effect
     assert effect.phase == Phase.GROWING
     outputs = effect.tick()
     assert len(outputs) > 0
@@ -142,8 +143,9 @@ def test_growing_on_first_update():
 
 def test_phases_progress():
     """Phase only moves forward; reaches DONE within bounded ticks."""
-    effect = GroveEffect(seed=42)
+    effect = GroveEffect(seed=42, idle_secs=0)
     effect.on_pty_update(make_pty_update(40, 12))
+    effect.tick()  # start effect
     prev_phase = effect.phase
     max_ticks = GROWING_DURATION + PERCHING_DURATION + FADE_DURATION + 100
     for _ in range(max_ticks):
@@ -160,7 +162,7 @@ def test_phases_progress():
 
 def test_done_returns_empty():
     """tick() returns [] after full lifecycle."""
-    effect = GroveEffect(seed=42)
+    effect = GroveEffect(seed=42, idle_secs=0)
     effect.on_pty_update(make_pty_update(40, 12))
     max_ticks = GROWING_DURATION + PERCHING_DURATION + FADE_DURATION + 100
     assert run_to_phase(effect, Phase.DONE, max_ticks=max_ticks)
@@ -168,25 +170,10 @@ def test_done_returns_empty():
     assert effect.tick() == []
 
 
-def test_cursor_shake_triggers_fading():
-    """Rapid cursor changes trigger FADING."""
-    effect = GroveEffect(seed=0)
-    effect.on_pty_update(make_pty_update(80, 24, cursor=(0, 0)))
-    advance(effect, 5)
-    assert effect.phase == Phase.GROWING
-
-    for i in range(15):
-        x = (i % 2) * 10
-        effect.on_pty_update(make_pty_update(80, 24, cursor=(x, 0)))
-
-    effect.tick()
-    assert effect.phase == Phase.FADING
-
-
 def test_seeded_deterministic():
     """Same seed produces identical first 5 frames."""
     def collect_frames(seed):
-        e = GroveEffect(seed=seed)
+        e = GroveEffect(seed=seed, idle_secs=0)
         e.on_pty_update(make_pty_update(40, 12))
         frames = []
         for _ in range(5):
@@ -205,23 +192,25 @@ def test_seeded_deterministic():
 
 def test_step_integration():
     """Use harness.step() to drive effect through a few ticks."""
-    effect = GroveEffect(seed=0)
-    result = step(effect, [make_pty_json(40, 12)])
-    assert len(result) >= 1
-    data = json.loads(result[0])
-    assert "output_cells" in data
-    cells = data["output_cells"]
-    assert isinstance(cells, list)
-    assert len(cells) > 0
+    effect = GroveEffect(seed=0, idle_secs=0)
+    # First step: PTYUpdate sets idle_until; tick starts effect but returns []
+    step(effect, [make_pty_json(40, 12)])
 
-    for _ in range(5):
+    # Grove grows gradually; advance until we get output
+    found = False
+    for _ in range(15):
         result = step(effect, [])
-        assert len(result) >= 1
+        if result:
+            data = json.loads(result[0])
+            if "output_cells" in data and data["output_cells"]:
+                found = True
+                break
+    assert found, "No output_cells from grove in first 15 steps after start"
 
 
 def test_resize_no_oob():
     """No OOB coordinates after resize to 20x6."""
-    effect = GroveEffect(seed=42)
+    effect = GroveEffect(seed=42, idle_secs=0)
     effect.on_pty_update(make_pty_update(80, 24))
     advance(effect, 20)
 
@@ -242,7 +231,7 @@ def test_resize_no_oob():
 @pytest.mark.parametrize("seed", SEEDS)
 def test_flower_patterns_in_bounds(seed):
     """Multi-cell flower patterns must stay within terminal bounds."""
-    effect = GroveEffect(seed=seed)
+    effect = GroveEffect(seed=seed, idle_secs=0)
     effect.on_pty_update(make_pty_update(80, 24))
     # Run through growing phase to let flowers bloom
     for _ in range(GROWING_DURATION + 50):
@@ -262,7 +251,7 @@ def test_flower_patterns_in_bounds(seed):
 
 def test_ghost_erasure_cells_present():
     """After birds move, eraser cells (space chars) should appear for old positions."""
-    effect = GroveEffect(seed=42)
+    effect = GroveEffect(seed=42, idle_secs=0)
     effect.on_pty_update(make_pty_update(80, 24))
     # Advance into perching phase where birds move
     assert run_to_phase(effect, Phase.PERCHING, max_ticks=GROWING_DURATION + 50)
@@ -281,7 +270,7 @@ def test_ghost_erasure_cells_present():
 
 def test_vine_chars_stable_within_timer():
     """Vine characters should not change every tick (stable within timer window)."""
-    effect = GroveEffect(seed=42)
+    effect = GroveEffect(seed=42, idle_secs=0)
     effect.on_pty_update(make_pty_update(80, 24))
     # Grow vines
     advance(effect, 100)
@@ -307,7 +296,7 @@ def test_vine_chars_stable_within_timer():
 @pytest.mark.parametrize("seed", SEEDS)
 def test_attached_flowers_in_bounds(seed):
     """Attached flowers (vine/canopy) must stay within terminal bounds."""
-    effect = GroveEffect(seed=seed)
+    effect = GroveEffect(seed=seed, idle_secs=0)
     effect.on_pty_update(make_pty_update(80, 24))
     for _ in range(GROWING_DURATION + 50):
         if effect.phase == Phase.DONE:
