@@ -98,47 +98,63 @@ class TestEnsureExecutable:
 # ---------------------------------------------------------------------------
 
 class TestGenerateConfig:
-    def test_creates_file(self, tmp_path):
-        path = generate_config("/path/to/fire.py", config_dir=str(tmp_path))
-        assert Path(path).is_file()
+    def test_creates_dir(self, tmp_path):
+        config_dir = generate_config("/path/to/fire.py", config_dir=str(tmp_path / "cfg"))
+        assert Path(config_dir).is_dir()
+        assert (Path(config_dir) / "tattoy.toml").is_file()
 
     def test_toml_content(self, tmp_path):
-        path = generate_config(
+        config_dir = generate_config(
             "/path/to/fire.py",
             shell_cmd="/bin/zsh",
             fps=60,
             config_dir=str(tmp_path),
         )
-        content = Path(path).read_text()
+        content = (Path(config_dir) / "tattoy.toml").read_text()
         assert 'command = "/bin/zsh"' in content
         assert "frame_rate = 60" in content
         assert 'path = "/path/to/fire.py"' in content
         assert "[[plugins]]" in content
+        assert 'name = "fire"' in content
         assert "layer = 1" in content
+        assert "show_tattoy_indicator = false" in content
+        assert "show_startup_logo = false" in content
+        assert "[keybindings]" in content
+        assert 'toggle_tattoy' in content
+
+    def test_seeds_palette(self, tmp_path):
+        config_dir = generate_config("/path/to/fire.py", config_dir=str(tmp_path))
+        assert (Path(config_dir) / "palette.toml").is_file()
+
+    def test_does_not_overwrite_existing_palette(self, tmp_path):
+        existing = tmp_path / "palette.toml"
+        existing.write_text("custom = [1, 2, 3]\n")
+        generate_config("/path/to/fire.py", config_dir=str(tmp_path))
+        assert existing.read_text() == "custom = [1, 2, 3]\n"
 
     def test_default_shell(self, tmp_path):
         with mock.patch.dict(os.environ, {"SHELL": "/bin/fish"}):
-            path = generate_config("/path/to/fire.py", config_dir=str(tmp_path))
-        content = Path(path).read_text()
+            config_dir = generate_config("/path/to/fire.py", config_dir=str(tmp_path))
+        content = (Path(config_dir) / "tattoy.toml").read_text()
         assert 'command = "/bin/fish"' in content
 
     def test_backslash_escaping(self, tmp_path):
-        path = generate_config(
+        config_dir = generate_config(
             r"C:\Users\test\fire.py",
             shell_cmd=r"C:\Windows\system32\cmd.exe",
             config_dir=str(tmp_path),
         )
-        content = Path(path).read_text()
+        content = (Path(config_dir) / "tattoy.toml").read_text()
         assert r'command = "C:\\Windows\\system32\\cmd.exe"' in content
         assert r'path = "C:\\Users\\test\\fire.py"' in content
 
     def test_quote_escaping(self, tmp_path):
-        path = generate_config(
+        config_dir = generate_config(
             '/path/to/"fire".py',
             shell_cmd='/bin/sh -c "echo hi"',
             config_dir=str(tmp_path),
         )
-        content = Path(path).read_text()
+        content = (Path(config_dir) / "tattoy.toml").read_text()
         assert r'command = "/bin/sh -c \"echo hi\""' in content
         assert r'path = "/path/to/\"fire\".py"' in content
 
@@ -188,7 +204,7 @@ class TestMain:
         mock_exec.assert_called_once()
         args = mock_exec.call_args[0]
         assert args[0] == "/usr/bin/tattoy"
-        assert "--main-config" in args[1]
+        assert "--config-dir" in args[1]
         assert "/tmp/test.toml" in args[1]
 
     def test_command_passthrough(self):
@@ -205,3 +221,54 @@ class TestMain:
         with mock.patch("clippy.effects.discover_effects", return_value={}):
             assert main([]) == 1
         assert "No effects" in capsys.readouterr().err
+
+    def test_list_excludes_overlay(self, capsys):
+        fake_effects = {
+            "fire": {"name": "fire", "description": "Fire", "module_path": "/fire.py", "class_name": "FireEffect"},
+            "mascot": {"name": "mascot", "description": "Mascot", "overlay": True, "module_path": "/mascot.py", "class_name": "MascotEffect"},
+        }
+        with mock.patch("clippy.effects.discover_effects", return_value=fake_effects):
+            assert main(["--list"]) == 0
+        out = capsys.readouterr().out
+        assert "fire" in out
+        assert "mascot" not in out
+
+    def test_effect_overlay_rejected(self, capsys):
+        assert main(["--effect", "mascot"]) == 1
+        err = capsys.readouterr().err
+        assert "overlay" in err.lower()
+
+    def test_demo_overlay_allowed(self):
+        with mock.patch("clippy.demo.demo_run"):
+            assert main(["--demo", "mascot"]) == 0
+
+    def test_launch_includes_mascot(self):
+        with mock.patch("clippy.launcher.find_tattoy", return_value="/usr/bin/tattoy"), \
+             mock.patch("clippy.launcher.generate_config", return_value="/tmp/test.toml") as mock_gen, \
+             mock.patch("clippy.launcher.ensure_executable"), \
+             mock.patch("os.execvp"):
+            main(["--effect", "fire"])
+        _, kwargs = mock_gen.call_args
+        assert kwargs.get("mascot_path") is not None
+
+
+class TestGenerateConfigMascot:
+    def test_toml_with_mascot(self, tmp_path):
+        config_dir = generate_config(
+            effect_path="/path/to/fire.py",
+            mascot_path="/path/to/mascot.py",
+            config_dir=str(tmp_path),
+        )
+        content = (Path(config_dir) / "tattoy.toml").read_text()
+        assert content.count("[[plugins]]") == 2
+        assert 'name = "mascot"' in content
+        assert "layer = 2" in content
+        assert 'path = "/path/to/mascot.py"' in content
+
+    def test_toml_without_mascot_has_one_plugin(self, tmp_path):
+        config_dir = generate_config(
+            effect_path="/path/to/fire.py",
+            config_dir=str(tmp_path),
+        )
+        content = (Path(config_dir) / "tattoy.toml").read_text()
+        assert content.count("[[plugins]]") == 1

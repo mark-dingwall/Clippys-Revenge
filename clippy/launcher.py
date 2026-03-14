@@ -42,13 +42,15 @@ def _escape_toml_string(s: str) -> str:
 
 def generate_config(
     effect_path: str,
+    mascot_path: str | None = None,
     shell_cmd: str | None = None,
     fps: int = 30,
     config_dir: str | None = None,
 ) -> str:
-    """Generate tattoy.toml and return its path.
+    """Generate tattoy.toml (and palette.toml if absent) and return the config dir path.
 
     config_dir defaults to ~/.cache/clippys-revenge/ (overridable for tests).
+    When mascot_path is provided, a second [[plugins]] block is appended at layer 2.
     """
     if shell_cmd is None:
         shell_cmd = os.environ.get("SHELL", "/bin/bash")
@@ -58,18 +60,42 @@ def generate_config(
     out_dir = Path(config_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    plugin_name = Path(effect_path).stem
     toml_content = (
         f'command = "{_escape_toml_string(shell_cmd)}"\n'
         f"frame_rate = {fps}\n"
+        f"show_tattoy_indicator = false\n"
+        f"show_startup_logo = false\n"
+        f"\n"
+        f"[keybindings]\n"
+        f'toggle_tattoy = {{ mods = "ALT", key = "t" }}\n'
         f"\n"
         f"[[plugins]]\n"
+        f'name = "{_escape_toml_string(plugin_name)}"\n'
         f'path = "{_escape_toml_string(effect_path)}"\n'
         f"layer = 1\n"
     )
 
-    config_path = out_dir / "tattoy.toml"
-    config_path.write_text(toml_content)
-    return str(config_path)
+    if mascot_path is not None:
+        mascot_name = Path(mascot_path).stem
+        toml_content += (
+            f"\n"
+            f"[[plugins]]\n"
+            f'name = "{_escape_toml_string(mascot_name)}"\n'
+            f'path = "{_escape_toml_string(mascot_path)}"\n'
+            f"layer = 2\n"
+        )
+
+    (out_dir / "tattoy.toml").write_text(toml_content)
+
+    # Pre-seed palette.toml so tattoy skips interactive palette detection.
+    # Without this, tattoy prompts the user on first run, which fails in WSL/multiplexers.
+    palette_path = out_dir / "palette.toml"
+    if not palette_path.exists():
+        bundled = Path(__file__).parent / "default_palette.toml"
+        palette_path.write_text(bundled.read_text())
+
+    return str(out_dir)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -113,18 +139,20 @@ def main(argv: list[str] | None = None) -> int:
 
     from clippy.effects import discover_effects
     effects = discover_effects()
+    selectable = {k: v for k, v in effects.items() if not v.get("overlay")}
+    overlays   = {k: v for k, v in effects.items() if     v.get("overlay")}
 
-    # --list
+    # --list (overlays excluded)
     if args.list:
-        if not effects:
+        if not selectable:
             print("No effects found.")
             return 0
-        for name, meta in sorted(effects.items()):
+        for name, meta in sorted(selectable.items()):
             desc = meta.get("description", "")
             print(f"  {name:20s} {desc}")
         return 0
 
-    # --demo
+    # --demo (all effects allowed, including overlays)
     if args.demo:
         if args.demo not in effects:
             print(f"Unknown effect: {args.demo}", file=sys.stderr)
@@ -134,7 +162,7 @@ def main(argv: list[str] | None = None) -> int:
         meta = effects[args.demo]
         module = importlib.import_module(f"clippy.effects.{Path(meta['module_path']).stem}")
         effect_class = getattr(module, meta["class_name"])
-        effect = effect_class()
+        effect = effect_class(idle_secs=0)
 
         try:
             cols, rows = os.get_terminal_size()
@@ -149,18 +177,22 @@ def main(argv: list[str] | None = None) -> int:
             pass
         return 0
 
-    # Select effect
+    # Select effect (overlays not selectable via --effect or random)
     if args.effect:
-        if args.effect not in effects:
+        if args.effect in overlays:
+            print(f"'{args.effect}' is an overlay effect and cannot be used with --effect.", file=sys.stderr)
+            print(f"Use --demo {args.effect} to preview it.", file=sys.stderr)
+            return 1
+        if args.effect not in selectable:
             print(f"Unknown effect: {args.effect}", file=sys.stderr)
-            print(f"Available: {', '.join(sorted(effects))}", file=sys.stderr)
+            print(f"Available: {', '.join(sorted(selectable))}", file=sys.stderr)
             return 1
         selected = args.effect
     else:
-        if not effects:
+        if not selectable:
             print("No effects found.", file=sys.stderr)
             return 1
-        selected = random.choice(list(effects.keys()))
+        selected = random.choice(list(selectable.keys()))
 
     # Require tattoy
     tattoy_path = find_tattoy()
@@ -177,6 +209,11 @@ def main(argv: list[str] | None = None) -> int:
     # Ensure effect script is executable
     ensure_executable(Path(effect_path))
 
+    # Inject mascot overlay if available
+    mascot_path = overlays["mascot"]["module_path"] if "mascot" in overlays else None
+    if mascot_path is not None:
+        ensure_executable(Path(mascot_path))
+
     # Set PYTHONPATH so the effect subprocess can import clippy.*
     project_root = str(Path(__file__).resolve().parent.parent)
     existing = os.environ.get("PYTHONPATH", "")
@@ -189,13 +226,14 @@ def main(argv: list[str] | None = None) -> int:
     # Generate config and launch
     config_path = generate_config(
         effect_path=effect_path,
+        mascot_path=mascot_path,
         shell_cmd=shell_cmd,
         fps=args.fps,
     )
 
     print(f"Launching Clippy's Revenge with '{selected}' effect...")
 
-    os.execvp(tattoy_path, [tattoy_path, "--main-config", config_path])
+    os.execvp(tattoy_path, [tattoy_path, "--config-dir", config_path])
     return 0  # unreachable, but keeps the type checker happy
 
 
