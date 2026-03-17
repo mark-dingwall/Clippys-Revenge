@@ -50,7 +50,7 @@ def generate_config(
     """Generate tattoy.toml (and palette.toml if absent) and return the config dir path.
 
     config_dir defaults to ~/.cache/clippys-revenge/ (overridable for tests).
-    When mascot_path is provided, a second [[plugins]] block is appended at layer 2.
+    When mascot_path is provided, a second [[plugins]] block is appended at layer 3.
     """
     if shell_cmd is None:
         shell_cmd = os.environ.get("SHELL", "/bin/bash")
@@ -73,7 +73,7 @@ def generate_config(
         f"[[plugins]]\n"
         f'name = "{_escape_toml_string(plugin_name)}"\n'
         f'path = "{_escape_toml_string(effect_path)}"\n'
-        f"layer = 1\n"
+        f"layer = 2\n"
     )
 
     if mascot_path is not None:
@@ -83,7 +83,7 @@ def generate_config(
             f"[[plugins]]\n"
             f'name = "{_escape_toml_string(mascot_name)}"\n'
             f'path = "{_escape_toml_string(mascot_path)}"\n'
-            f"layer = 2\n"
+            f"layer = 3\n"
         )
 
     (out_dir / "tattoy.toml").write_text(toml_content)

@@ -116,7 +116,7 @@ class TestGenerateConfig:
         assert 'path = "/path/to/fire.py"' in content
         assert "[[plugins]]" in content
         assert 'name = "fire"' in content
-        assert "layer = 1" in content
+        assert "layer = 2" in content
         assert "show_tattoy_indicator = false" in content
         assert "show_startup_logo = false" in content
         assert "[keybindings]" in content
@@ -252,6 +252,18 @@ class TestMain:
         assert kwargs.get("mascot_path") is not None
 
 
+    def test_fps_flag_forwarded_to_generate_config(self):
+        """--fps 60 is forwarded to generate_config as fps=60."""
+        with mock.patch("clippy.launcher.find_tattoy", return_value="/usr/bin/tattoy"), \
+             mock.patch("clippy.launcher.generate_config", return_value="/tmp/test.toml") as mock_gen, \
+             mock.patch("clippy.launcher.ensure_executable"), \
+             mock.patch("os.execvp"):
+            main(["--effect", "fire", "--fps", "60"])
+
+        _, kwargs = mock_gen.call_args
+        assert kwargs["fps"] == 60
+
+
 class TestGenerateConfigMascot:
     def test_toml_with_mascot(self, tmp_path):
         config_dir = generate_config(
@@ -262,7 +274,7 @@ class TestGenerateConfigMascot:
         content = (Path(config_dir) / "tattoy.toml").read_text()
         assert content.count("[[plugins]]") == 2
         assert 'name = "mascot"' in content
-        assert "layer = 2" in content
+        assert "layer = 3" in content
         assert 'path = "/path/to/mascot.py"' in content
 
     def test_toml_without_mascot_has_one_plugin(self, tmp_path):
