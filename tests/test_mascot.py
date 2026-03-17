@@ -179,19 +179,16 @@ def test_blink_changes_eye_char():
     corner_y = h - FACE_H - MARGIN
     eye_pos = (corner_x, corner_y + 1)  # left eye at (col, row 1)
 
-    # Tick 10: no blink (10 % 100 = 10 >= 3)
+    # Tick 10: _tick_count=13, no blink (13 % 100 = 13 >= 3)
     for _ in range(10):
         outputs = effect.tick()
     no_blink_char = char_at(outputs, eye_pos)
 
-    # Tick 100: blink (100 % 100 = 0 < 3)
-    for _ in range(90):
+    # Advance to blink window: _tick_count=100 → 100 % 100 = 0 < 3
+    # Need 87 more ticks (100 - 13 = 87)
+    for _ in range(86):
         effect.tick()
-    blink_outputs = effect.tick()  # tick 101 (100 already at non-blink, 101 = 1 < 3)
-
-    # More reliable: advance until we hit a blink tick
-    # Blink ticks: t % BLINK_PERIOD < BLINK_DURATION, i.e., t in {0,1,2, 100,101,102, ...}
-    # From tick 10, we advance to tick 100 (90 more ticks)
+    blink_outputs = effect.tick()  # tick 97: _tick_count=100, blink
     blink_char = char_at(blink_outputs, eye_pos)
 
     assert no_blink_char is not None
@@ -275,14 +272,15 @@ def test_demo_mode_reaches_done():
 
 
 def test_live_mode_loops():
-    idle_secs = 10
+    idle_secs = 30
     effect = MascotEffect(idle_secs=idle_secs)
     effect.on_pty_update(make_pty_update(80, 24))
 
-    cackle_end = round(idle_secs * 1.30 * FPS) + 90
-    for _ in range(cackle_end):
+    # Drive past the end of the first full cycle (cackle_end = idle_secs * FPS)
+    for _ in range(round(idle_secs * FPS) + 10):
         effect.tick()
 
+    # Live mode never reaches DONE — it resets back to WATCHING
     assert effect.phase == Phase.WATCHING
 
 
@@ -348,3 +346,43 @@ def test_step_wire_format():
     assert "coordinates" in cell
     assert isinstance(cell["coordinates"], list)
     assert len(cell["coordinates"]) == 2
+
+
+# ---------------------------------------------------------------------------
+# Cursor-shake skip
+# ---------------------------------------------------------------------------
+
+def _shake_msgs():
+    return [json.dumps({
+        "pty_update": {
+            "size": [80, 24],
+            "cells": [],
+            "cursor": [x, 0],
+        }
+    }) for x in [10, 30, 10, 30, 10]]
+
+
+def test_cursor_shake_in_watching_skips_to_imminent_deep():
+    """Cursor shake during WATCHING jumps directly to IMMINENT_DEEP."""
+    effect = MascotEffect(idle_secs=300)
+    effect.on_pty_update(make_pty_update(80, 24))
+    # Tick a few times to stay in WATCHING
+    for _ in range(5):
+        effect.tick()
+    assert effect.phase == Phase.WATCHING
+    step(effect, _shake_msgs())
+    assert effect.phase == Phase.IMMINENT_DEEP
+
+
+def test_cursor_shake_recalculates_cackle_timing():
+    """After shake-skip, cackle_start is recalculated from current tick."""
+    effect = MascotEffect(idle_secs=300)
+    effect.on_pty_update(make_pty_update(80, 24))
+    for _ in range(5):
+        effect.tick()
+    step(effect, _shake_msgs())
+    assert effect.phase == Phase.IMMINENT_DEEP
+    # cackle_start should be close to current tick + 5s worth of ticks
+    expected_cackle_start = effect._tick_count + round(5 * FPS)
+    # Allow a small tolerance since step() also calls tick()
+    assert abs(effect._cackle_start - expected_cackle_start) <= 1

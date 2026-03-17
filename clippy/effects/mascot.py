@@ -7,10 +7,10 @@ import os
 from enum import IntEnum
 
 from clippy.harness import run
-from clippy.types import Cell, Color, OutputCells, OutputMessage, PTYUpdate, TTYResize
+from clippy.types import Cell, Color, CursorShakeDetector, OutputCells, OutputMessage, PTYUpdate, TTYResize
 
 FPS = 30
-FACE_W = 5       # max width in cells (cols 0–4)
+FACE_W = 4       # max width in cells (cols 0–3)
 FACE_H = 5       # height in rows (rows 0–4)
 MARGIN = 1       # cells from right/bottom edge
 
@@ -23,10 +23,10 @@ EYE_ALPHA_MAX = 1.0
 
 CACKLE_FLIP_TICKS = 10
 
-DEMO_WATCHING_TICKS       = 30   # 1s watching
-DEMO_IMMINENT_EARLY_TICKS = 45   # 1.5s raised eyebrows
-DEMO_IMMINENT_DEEP_TICKS  = 45   # 1.5s angry red eyes
-DEMO_CACKLING_TICKS       = 90   # 3s cackling
+DEMO_WATCHING_TICKS       = 30    # 1s watching
+DEMO_IMMINENT_EARLY_TICKS = 150   # 5s raised eyebrows
+DEMO_IMMINENT_DEEP_TICKS  = 150   # 5s angry red eyes
+DEMO_CACKLING_TICKS       = 150   # 5s cackling
 
 
 class Phase(IntEnum):
@@ -98,7 +98,7 @@ class MascotEffect:
             idle_secs = float(os.environ.get("CLIPPY_INTERVAL", "300"))
         self._idle_secs = idle_secs
         self._demo_mode = idle_secs == 0
-        self._tick_count = 0
+        self._tick_count = BLINK_DURATION
         self._phase = Phase.WATCHING
         self._width = 0
         self._height = 0
@@ -107,6 +107,10 @@ class MascotEffect:
         self._imminent_deep_start = 0
         self._cackle_start = 0
         self._cackle_end = 0
+
+        # Cursor-shake skip
+        self._shake = CursorShakeDetector()
+        self._skip_requested = False
 
     # -- Timing -----------------------------------------------------------
 
@@ -117,15 +121,17 @@ class MascotEffect:
             self._cackle_start         = self._imminent_deep_start + DEMO_IMMINENT_DEEP_TICKS
             self._cackle_end           = self._cackle_start + DEMO_CACKLING_TICKS
         else:
-            self._imminent_early_start = round(self._idle_secs * 0.70 * FPS)
-            self._imminent_deep_start  = round(self._idle_secs * 0.79 * FPS)
-            self._cackle_start         = round(self._idle_secs * 1.30 * FPS)
-            self._cackle_end           = self._cackle_start + 90
+            self._imminent_early_start = round((self._idle_secs - 15) * FPS)
+            self._imminent_deep_start  = round((self._idle_secs - 10) * FPS)
+            self._cackle_start         = round((self._idle_secs - 5)  * FPS)
+            self._cackle_end           = round(self._idle_secs         * FPS)
 
     # -- Protocol callbacks -----------------------------------------------
 
     def on_pty_update(self, update: PTYUpdate) -> None:
         self._width, self._height = update.size
+        if self._shake.update(update.cursor):
+            self._skip_requested = True
         if not self._received_first_update:
             self._received_first_update = True
             self._compute_timing()
@@ -154,7 +160,7 @@ class MascotEffect:
             if self._demo_mode:
                 self._phase = Phase.DONE
             else:
-                self._tick_count = 0
+                self._tick_count = BLINK_DURATION
                 self._phase = Phase.WATCHING
                 self._compute_timing()
 
@@ -191,14 +197,14 @@ class MascotEffect:
             body_chars = _BODY_ROUNDED
             blink = phase == Phase.WATCHING and t % BLINK_PERIOD < BLINK_DURATION
             if phase == Phase.WATCHING:
-                eye_l = "─" if blink else "ʘ̄"
-                eye_r = "─" if blink else "ʘ̄"
+                eye_l = "─" if blink else "ʘ"
+                eye_r = "─" if blink else "ʘ"
             elif phase == Phase.IMMINENT_EARLY:
-                eye_l = "ʘ̂"
-                eye_r = "ʘ̂"
+                eye_l = "◎"
+                eye_r = "◎"
             else:  # IMMINENT_DEEP
-                eye_l = "ʘ̀"
-                eye_r = "ʘ́"
+                eye_l = "◉"
+                eye_r = "◉"
             all_chars = body_chars + [
                 (_EYE_L_POS[0], _EYE_L_POS[1], eye_l, True),
                 (_EYE_R_POS[0], _EYE_R_POS[1], eye_r, True),
@@ -230,6 +236,14 @@ class MascotEffect:
         self._tick_count += 1
         if not self._received_first_update:
             return []
+        # Cursor-shake: jump to IMMINENT_DEEP if still in early phases
+        if self._skip_requested:
+            if self._phase in (Phase.WATCHING, Phase.IMMINENT_EARLY):
+                t = self._tick_count
+                self._phase = Phase.IMMINENT_DEEP
+                self._cackle_start = t + round(5 * FPS)
+                self._cackle_end   = t + round(10 * FPS)
+            self._skip_requested = False
         self._update_phase()
         if self._phase == Phase.DONE:
             return []
