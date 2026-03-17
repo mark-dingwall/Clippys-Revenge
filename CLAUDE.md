@@ -47,7 +47,7 @@ User runs `clippy` CLI
 
 **Core modules:**
 
-- `clippy/types.py` — Protocol dataclasses (`Cell`, `Pixel`, `PTYUpdate`, `TTYResize`, `OutputText`, `OutputCells`, `OutputPixels`) and JSON serialization. `from_json()` never raises — returns `None` for any malformed input.
+- `clippy/types.py` — Protocol dataclasses (`Cell`, `Pixel`, `PTYUpdate`, `TTYResize`, `OutputText`, `OutputCells`, `OutputPixels`) and JSON serialization. `from_json()` never raises — returns `None` for any malformed input. Also contains `CursorShakeDetector` (detects 3 x-axis reversals within 60 ticks).
 - `clippy/harness.py` — `Effect` protocol, `step()` (single-tick test seam), and `run()` (threaded stdin/stdout protocol loop with frame-rate control).
 - `clippy/effects/` — Individual effect plugins. Each has `EFFECT_META` dict and `if __name__ == "__main__": run(Effect())`.
 - `clippy/launcher.py` — CLI entry point. Discovers effects, generates tattoy config, execs tattoy.
@@ -94,8 +94,11 @@ The golden files in `tests/golden/` are the source of truth for wire format.
 - **`MessageReader`** helper in `test_harness.py` prevents premature shutdown in `run()` tests (plain `io.StringIO` hits EOF instantly, setting the shutdown event).
 - **Malformed input resilience:** `from_json()` returns `None` for empty lines, whitespace, invalid JSON, unknown keys, null payloads — harness must never crash on bad input.
 - Effect lifecycles:
-  - Fire: `IDLE → SPREADING → BURNING → WASTELAND → FADING → DONE` (or `CANCEL_FADING → DONE` via cursor-shake)
-  - Invaders: `IDLE → BOMBARDMENT → ACTIVE → FADING → DONE`
+  - Fire: `IDLE → SPREADING → BURNING → WASTELAND → DONE` (or any active phase → `CANCEL_FADING → DONE` via cursor-shake)
+  - Invaders: `IDLE → BOMBARDMENT → ACTIVE → FADING → DONE` (ACTIVE capped at 1050 ticks; cursor-shake skips to FADING)
+  - Grove: `IDLE → GROWING → PERCHING → FADING → DONE` (cursor-shake skips to FADING)
+  - Microbes: `IDLE → SWARMING → FADING → DONE` (cursor-shake skips to FADING)
+  - Mascot: `WATCHING → IMMINENT_EARLY → IMMINENT_DEEP → CACKLING → reset` (cursor-shake jumps to IMMINENT_DEEP)
 
 ## Mocking Quick Reference
 
