@@ -2,7 +2,8 @@
 # Clippy's Revenge — installer
 #
 # Usage:
-#   bash install.sh
+#   bash install.sh           # install latest from GitHub
+#   bash install.sh --local   # install from this working directory (for development)
 #   curl -fsSL https://raw.githubusercontent.com/Axionatic/Clippys-Revenge/main/install.sh | bash
 
 set -euo pipefail
@@ -10,6 +11,22 @@ set -euo pipefail
 INSTALL_DIR="$HOME/.local/share/clippys-revenge"
 BIN_DIR="$HOME/.local/bin"
 REPO_URL="https://github.com/Axionatic/Clippys-Revenge.git"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd || echo "")"
+
+# -- Argument parsing --------------------------------------------------------
+
+LOCAL=false
+for arg in "$@"; do
+    case "$arg" in
+        --local) LOCAL=true ;;
+        *) printf '\033[1;31m::\033[0m Unknown argument: %s\n' "$arg" >&2; exit 1 ;;
+    esac
+done
+
+if [ "$LOCAL" = true ] && [ -z "$SCRIPT_DIR" ]; then
+    printf '\033[1;31m::\033[0m --local requires the script to be run from a file, not piped.\n' >&2
+    exit 1
+fi
 
 # -- Helpers ----------------------------------------------------------------
 
@@ -67,12 +84,14 @@ if [ "$py_major" -lt 3 ] || { [ "$py_major" -eq 3 ] && [ "$py_minor" -lt 10 ]; }
 fi
 ok "Python $py_version"
 
-# Git
-if ! command -v git &>/dev/null; then
-    err "git not found. Install git and try again."
-    exit 1
+# Git (not needed for --local installs)
+if [ "$LOCAL" = false ]; then
+    if ! command -v git &>/dev/null; then
+        err "git not found. Install git and try again."
+        exit 1
+    fi
+    ok "git $(git --version | awk '{print $3}')"
 fi
-ok "git $(git --version | awk '{print $3}')"
 
 # -- Tattoy detection -------------------------------------------------------
 
@@ -111,7 +130,23 @@ fi
 
 # -- Project installation ---------------------------------------------------
 
-if [ -d "$INSTALL_DIR/.git" ]; then
+if [ "$LOCAL" = true ]; then
+    info "Installing from local source: $SCRIPT_DIR"
+    if [ -d "$INSTALL_DIR" ]; then
+        if ! rm -rf "$INSTALL_DIR"; then
+            err "Cannot remove $INSTALL_DIR (permission denied)."
+            err "Try: sudo rm -rf $INSTALL_DIR"
+            exit 1
+        fi
+    fi
+    if ! cp -r "$SCRIPT_DIR" "$INSTALL_DIR"; then
+        err "Failed to copy files to $INSTALL_DIR."
+        exit 1
+    fi
+    # Remove .git so a later normal install sees a clean slate and re-clones
+    rm -rf "$INSTALL_DIR/.git"
+    ok "Copied local files"
+elif [ -d "$INSTALL_DIR/.git" ]; then
     info "Updating existing install..."
     if ! git -C "$INSTALL_DIR" pull --ff-only; then
         err "git pull failed in $INSTALL_DIR."
