@@ -5,6 +5,7 @@ import pytest
 
 from clippy.effects.fire import (
     BURN_DURATION,
+    CANCEL_FADE_DURATION,
     CHARRED_TIERS,
     DECAY_MAX_TICKS,
     DECAY_MIN_TICKS,
@@ -553,3 +554,131 @@ def test_ember_count_invariant(seed):
         assert effect._ember_count == actual, (
             f"_ember_count={effect._ember_count} != actual={actual} at tick {effect._tick_count}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Cursor-shake CANCEL_FADING
+# ---------------------------------------------------------------------------
+
+def test_cursor_shake_triggers_cancel_fading():
+    """Cursor shake during SPREADING transitions immediately to CANCEL_FADING."""
+    effect = FireEffect(seed=0, idle_secs=0)
+    effect.on_pty_update(make_pty_update(80, 24))
+    effect.tick()  # idle_secs=0: starts effect
+    assert effect.phase == Phase.SPREADING
+
+    # 5 cursor positions produce 3 x-axis reversals → shake detected
+    shake_xs = [10, 30, 10, 30, 10]
+    for x in shake_xs:
+        effect.on_pty_update(make_pty_update(80, 24, cursor=(x, 0)))
+
+    effect.tick()
+    assert effect.phase == Phase.CANCEL_FADING
+
+
+def test_cancel_fading_fades_and_reaches_done():
+    """CANCEL_FADING decreases alpha and eventually reaches DONE."""
+    effect = FireEffect(seed=0, idle_secs=0)
+    effect.on_pty_update(make_pty_update(80, 24))
+    effect.tick()
+
+    shake_xs = [10, 30, 10, 30, 10]
+    for x in shake_xs:
+        effect.on_pty_update(make_pty_update(80, 24, cursor=(x, 0)))
+    effect.tick()
+    assert effect.phase == Phase.CANCEL_FADING
+
+    # Run for CANCEL_FADE_DURATION + a few extra ticks; phase should reach DONE
+    for _ in range(CANCEL_FADE_DURATION + 5):
+        effect.tick()
+        if effect.phase == Phase.DONE:
+            break
+
+    assert effect.phase == Phase.DONE, (
+        f"Expected DONE after CANCEL_FADING, got {effect.phase.name}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# BURN_DURATION governs BURNING→CHARRED transition
+# ---------------------------------------------------------------------------
+
+def test_burning_phase_bounded_by_burn_duration():
+    """A cell that was BURNING transitions to CHARRED after BURN_DURATION ticks."""
+    effect = FireEffect(seed=42, idle_secs=0)
+    effect.on_pty_update(make_pty_update(20, 8))
+    effect.tick()  # start effect
+
+    # Find a BURNING cell
+    burning_cell = None
+    for _ in range(50):
+        effect.tick()
+        for y in range(effect._height):
+            for x in range(effect._width):
+                if effect._cell_state[y][x] == BURNING_STATE:
+                    burning_cell = (x, y)
+                    break
+            if burning_cell:
+                break
+        if burning_cell:
+            break
+
+    assert burning_cell is not None, "No BURNING cell found"
+    bx, by = burning_cell
+    ignition_tick = effect._ignition_tick[by][bx]
+
+    # Tick until BURN_DURATION has elapsed for this cell
+    for _ in range(BURN_DURATION + 5):
+        effect.tick()
+
+    age = effect._tick_count - ignition_tick
+    assert age >= BURN_DURATION
+    assert effect._cell_state[by][bx] == CHARRED, (
+        f"Cell at ({bx},{by}) should be CHARRED after {age} ticks, "
+        f"got state={effect._cell_state[by][bx]}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# CANCEL_FADING alpha decreases
+# ---------------------------------------------------------------------------
+
+def test_cancel_fading_alpha_decreases():
+    """During CANCEL_FADING, at least one cell has fg alpha < 1.0."""
+    effect = FireEffect(seed=0, idle_secs=0)
+    effect.on_pty_update(make_pty_update(80, 24))
+    effect.tick()  # start effect
+    assert effect.phase == Phase.SPREADING
+
+    shake_xs = [10, 30, 10, 30, 10]
+    for x in shake_xs:
+        effect.on_pty_update(make_pty_update(80, 24, cursor=(x, 0)))
+    effect.tick()
+    assert effect.phase == Phase.CANCEL_FADING
+
+    found_dimmed = False
+    for _ in range(CANCEL_FADE_DURATION):
+        outputs = effect.tick()
+        for out in outputs:
+            for cell in out.cells:
+                if cell.fg is not None and cell.fg[3] < 1.0:
+                    found_dimmed = True
+        if found_dimmed:
+            break
+
+    assert found_dimmed, "No dimmed cells observed during CANCEL_FADING"
+
+
+# ---------------------------------------------------------------------------
+# Nonzero idle_secs delays start
+# ---------------------------------------------------------------------------
+
+def test_nonzero_idle_secs_delays_start():
+    """idle_secs=5 keeps effect in IDLE for at least 100 ticks after PTYUpdate."""
+    effect = FireEffect(seed=42, idle_secs=5)
+    effect.on_pty_update(make_pty_update(80, 24))
+    for _ in range(100):
+        effect.tick()
+    assert effect.phase == Phase.IDLE, (
+        f"Expected IDLE after 100 ticks with idle_secs=5, got {effect.phase.name}"
+    )

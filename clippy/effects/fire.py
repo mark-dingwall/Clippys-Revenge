@@ -16,11 +16,13 @@ from enum import IntEnum
 
 from clippy.harness import run
 from clippy.noise import noise3
-from clippy.types import Cell, Color, OutputCells, OutputMessage, PTYUpdate, TTYResize
+from clippy.types import Cell, Color, CursorShakeDetector, OutputCells, OutputMessage, PTYUpdate, TTYResize
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
+
+CANCEL_FADE_DURATION = 30   # ~1s fast fade when cursor-shake cancels the effect
 
 BURN_DURATION = 60          # ticks a cell burns before charring (~2s @30fps)
 
@@ -87,7 +89,8 @@ class Phase(IntEnum):
     SPREADING = 1
     BURNING = 2
     WASTELAND = 3
-    DONE = 4
+    CANCEL_FADING = 4
+    DONE = 5
 
 
 # ---------------------------------------------------------------------------
@@ -230,6 +233,11 @@ class FireEffect:
         self._flow_rows: int = 0
         self._last_flow_update: int = -FLOW_UPDATE_TICKS  # force update on first tick
 
+        # Cursor-shake cancel
+        self._shake = CursorShakeDetector()
+        self._cancel_requested = False
+        self._cancel_fade_start = 0
+
 
     # -- Grid management --------------------------------------------------
 
@@ -328,6 +336,8 @@ class FireEffect:
 
     def on_pty_update(self, update: PTYUpdate) -> None:
         w, h = update.size
+        if self._shake.update(update.cursor):
+            self._cancel_requested = True
         if self._phase == Phase.IDLE:
             self._width = w
             self._height = h
@@ -337,6 +347,9 @@ class FireEffect:
             self._handle_resize(w, h)
 
     def _start_effect(self) -> None:
+        if self._width == 0 or self._height == 0:
+            self._idle_until = self._tick_count + 1  # retry next tick
+            return
         self._init_grids(self._width, self._height)
         self._ignite_initial()
         self._phase = Phase.SPREADING
@@ -725,6 +738,9 @@ class FireEffect:
         return [OutputCells(cells=cells)]
 
     def _get_fade_alpha(self) -> float:
+        if self._phase == Phase.CANCEL_FADING:
+            elapsed = self._tick_count - self._cancel_fade_start
+            return max(0.0, 1.0 - elapsed / CANCEL_FADE_DURATION)
         return 1.0
 
     # -- Phase transitions ------------------------------------------------
@@ -740,6 +756,10 @@ class FireEffect:
 
         elif self._phase == Phase.WASTELAND:
             if self._charred_count <= 0 and self._ember_count <= 0 and not self._smoke:
+                self._phase = Phase.DONE
+
+        elif self._phase == Phase.CANCEL_FADING:
+            if self._get_fade_alpha() <= 0.0:
                 self._phase = Phase.DONE
 
     # -- Main tick --------------------------------------------------------
@@ -762,6 +782,14 @@ class FireEffect:
             self._phase = Phase.IDLE
             return []
 
+        # Cursor-shake cancel: transition active phases to CANCEL_FADING
+        if self._cancel_requested and self._phase in (
+            Phase.SPREADING, Phase.BURNING, Phase.WASTELAND
+        ):
+            self._cancel_fade_start = self._tick_count
+            self._phase = Phase.CANCEL_FADING
+        self._cancel_requested = False
+
         # Simulation
         if self._phase == Phase.SPREADING:
             self._spread_fire()
@@ -775,6 +803,10 @@ class FireEffect:
             self._update_embers()
             self._update_smoke()
         elif self._phase == Phase.WASTELAND:
+            self._decay_charred()
+            self._update_embers()
+            self._update_smoke()
+        elif self._phase == Phase.CANCEL_FADING:
             self._decay_charred()
             self._update_embers()
             self._update_smoke()
