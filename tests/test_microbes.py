@@ -12,7 +12,7 @@ from clippy.effects.microbes import (
     _hsb_to_rgb,
 )
 from clippy.harness import step
-from clippy.types import OutputPixels, PTYUpdate, TTYResize
+from clippy.types import OutputPixels, Pixel, PTYUpdate, TTYResize
 
 
 # ---------------------------------------------------------------------------
@@ -288,3 +288,60 @@ def test_catmull_rom():
     assert abs(_catmull_rom(0, 10, 20, 30, 1.0) - 20.0) < 1e-9
     # Midpoint with uniform spacing should be 15
     assert abs(_catmull_rom(0, 10, 20, 30, 0.5) - 15.0) < 1e-9
+
+
+# ---------------------------------------------------------------------------
+# Cursor-shake cancellation
+# ---------------------------------------------------------------------------
+
+def _shake_msgs():
+    return [make_pty_json(cursor=(x, 5)) for x in [10, 30, 10, 30, 10]]
+
+
+def test_cursor_shake_cancels_microbes():
+    """Cursor shake during SWARMING transitions to FADING."""
+    effect = MicrobesEffect(seed=42, idle_secs=0)
+    effect.on_pty_update(make_pty_update(80, 24))
+    effect.tick()  # start effect
+    assert effect.phase == Phase.SWARMING
+    step(effect, _shake_msgs())
+    assert effect.phase == Phase.FADING
+
+
+# ---------------------------------------------------------------------------
+# FADING alpha + ghost pixels
+# ---------------------------------------------------------------------------
+
+def test_fading_alpha_decreases():
+    """At least one pixel has color alpha < 1.0 during FADING."""
+    effect = MicrobesEffect(seed=42, idle_secs=0)
+    effect.on_pty_update(make_pty_update(80, 24))
+    assert run_to_phase(effect, Phase.FADING, max_ticks=SWARMING_DURATION + 50)
+    found_dimmed = False
+    for _ in range(30):
+        outputs = effect.tick()
+        for out in outputs:
+            for pixel in out.pixels:
+                if pixel.color is not None and pixel.color[3] < 1.0:
+                    found_dimmed = True
+        if found_dimmed or effect.phase == Phase.DONE:
+            break
+    assert found_dimmed, "No dimmed pixels observed during FADING"
+
+
+def test_ghost_pixels_emitted():
+    """At least one Pixel(color=None) appears after SWARMING starts."""
+    effect = MicrobesEffect(seed=42, idle_secs=0)
+    effect.on_pty_update(make_pty_update(80, 24))
+    effect.tick()  # start effect
+    assert effect.phase == Phase.SWARMING
+    found_ghost = False
+    for _ in range(SWARMING_DURATION + FADE_DURATION):
+        outputs = effect.tick()
+        for out in outputs:
+            for pixel in out.pixels:
+                if pixel.color is None:
+                    found_ghost = True
+        if found_ghost or effect.phase == Phase.DONE:
+            break
+    assert found_ghost, "No ghost pixel (color=None) observed"

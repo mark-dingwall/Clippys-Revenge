@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from enum import IntEnum
 
 from clippy.harness import run
-from clippy.types import Color, OutputMessage, OutputPixels, PTYUpdate, Pixel, TTYResize
+from clippy.types import Color, CursorShakeDetector, OutputMessage, OutputPixels, PTYUpdate, Pixel, TTYResize
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -148,6 +148,10 @@ class MicrobesEffect:
 
         # Ghost erasure
         self._prev_render_positions: set[tuple[int, int]] = set()
+
+        # Cursor-shake cancel
+        self._shake = CursorShakeDetector()
+        self._cancel_requested = False
 
     # -- Initialization -------------------------------------------------------
 
@@ -347,6 +351,8 @@ class MicrobesEffect:
 
     def on_pty_update(self, update: PTYUpdate) -> None:
         w, h = update.size
+        if self._shake.update(update.cursor):
+            self._cancel_requested = True
         if self._phase == Phase.IDLE:
             self._width = w
             self._height = h
@@ -466,6 +472,12 @@ class MicrobesEffect:
             self._idle_until = self._tick_count + self._pick_delay()
             self._phase = Phase.IDLE
             return []
+
+        # Cursor-shake cancel: force SWARMING to FADING
+        if self._cancel_requested and self._phase == Phase.SWARMING:
+            self._phase = Phase.FADING
+            self._fade_start_tick = self._tick_count
+        self._cancel_requested = False
 
         # Update microbes
         for m in self._microbes:
