@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from enum import IntEnum
 
 from clippy.harness import run
-from clippy.types import Cell, Color, OutputCells, OutputMessage, PTYUpdate, TTYResize
+from clippy.types import Cell, Color, CursorShakeDetector, OutputCells, OutputMessage, PTYUpdate, TTYResize
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -140,6 +140,60 @@ POS_5_MID_DIAG: dict[str, tuple[int, int]] = {
 VINE_CHAR_TIMER_MIN = 60
 VINE_CHAR_TIMER_MAX = 120
 
+MUSHROOM_CHARS = ["T", "t"]
+MUSHROOM_COLORS: list[Color] = [
+    (0.82, 0.71, 0.55, 1.0),
+    (0.80, 0.20, 0.20, 1.0),
+    (0.95, 0.90, 0.80, 1.0),
+    (0.50, 0.20, 0.60, 1.0),
+]
+
+SNAIL_CHARS = ["@", ">"]
+CATERPILLAR_CHARS = ["~", "~", "~", ">"]
+CRITTER_COLORS: list[Color] = [
+    (1.0, 0.45, 0.1, 1.0),
+    (1.0, 0.85, 0.1, 1.0),
+    (0.9, 0.20, 0.9, 1.0),
+]
+CRITTER_SPEED = 0.05
+
+WIND_GUST_CHANCE = 0.30
+WIND_GUST_INTERVAL_MIN = 60
+WIND_GUST_INTERVAL_MAX = 150
+WIND_WAVE_SPEED = 2
+WIND_DURATION = 20
+
+FIREFLY_CHARS = [".", "\u00b7"]
+FIREFLY_COLORS: list[Color] = [
+    (1.0, 0.95, 0.3, 1.0),
+    (0.6, 0.90, 0.2, 1.0),
+    (1.0, 0.80, 0.1, 1.0),
+]
+FIREFLY_COUNT_MIN = 8
+FIREFLY_COUNT_MAX = 20
+FIREFLY_MAX_SPEED = 0.25
+
+RAIN_DROP_COUNT = 30
+RAIN_SPEED_MIN = 0.5
+RAIN_SPEED_MAX = 1.2
+RAIN_COLOR: Color = (0.5, 0.55, 0.7, 0.6)
+RAIN_SPLASH_CHAR = "o"
+RAIN_SPLASH_DURATION = 6
+
+BUTTERFLY_CHARS = ["*", "~", "+"]
+BUTTERFLY_COLORS: list[Color] = [
+    (1.0, 0.4, 0.7, 1.0),
+    (0.3, 0.6, 1.0, 1.0),
+    (1.0, 0.9, 0.2, 1.0),
+    (0.7, 0.3, 0.9, 1.0),
+]
+BUTTERFLY_SPEED = 0.3
+BUTTERFLY_COUNT_MIN = 2
+BUTTERFLY_COUNT_MAX = 5
+BUTTERFLY_FLAP_PERIOD = 6
+BUTTERFLY_LAND_MIN = 30
+BUTTERFLY_LAND_MAX = 90
+
 
 # ---------------------------------------------------------------------------
 # Phase enum
@@ -238,6 +292,99 @@ class _Bird:
     spawn_tick: int
 
 
+@dataclass(slots=True)
+class _Mushroom:
+    x: int
+    base_y: int
+    char: str
+    color: Color
+    grow_delay: int
+    visible: bool = False
+
+
+@dataclass(slots=True)
+class _Critter:
+    tree_idx: int
+    kind: str  # 'snail' or 'caterpillar'
+    color: Color
+    fy: float
+    target_y: int
+    speed: float
+    side: int  # -1 or 1
+    reached: bool = False
+
+
+@dataclass(slots=True)
+class _Wind:
+    active: bool
+    direction: int  # -1 or 1
+    wave_front_x: float
+    start_tick: int
+    next_gust_tick: int
+
+
+@dataclass(slots=True)
+class _Firefly:
+    fx: float
+    fy: float
+    color: Color
+    char: str
+    spawn_delay: int
+    vx: float
+    vy: float
+    alive: bool
+
+
+@dataclass(slots=True)
+class _Leaf:
+    spawn_x: int
+    spawn_y: int
+    ground_y: int
+    fy: float
+    color: Color
+    char_idx: int
+    last_char_tick: int
+    fall_rate: float
+    period: float
+    h_amplitude: float
+    v_amplitude: float
+    spawn_delay: int
+    alive: bool
+    draw_x: int
+    draw_y: int
+    state: str  # 'canopy' or 'falling'
+
+
+@dataclass(slots=True)
+class _RainDrop:
+    x: int
+    fy: float
+    speed: float
+    char: str
+    active: bool
+
+
+@dataclass(slots=True)
+class _RainSplash:
+    x: int
+    y: int
+    birth_tick: int
+    duration: int
+
+
+@dataclass(slots=True)
+class _Butterfly:
+    fx: float
+    fy: float
+    target_flower_idx: int
+    color: Color
+    char_idx: int
+    state: str  # 'flying' or 'landed'
+    landed_tick: int
+    land_duration: int
+    sine_offset: float
+
+
 # ---------------------------------------------------------------------------
 # GroveEffect
 # ---------------------------------------------------------------------------
@@ -265,14 +412,32 @@ class GroveEffect:
         self._bushes: list[_Bush] = []
         self._birds: list[_Bird] = []
         self._attached_flowers: list[_Flower] = []
+        self._mushrooms: list[_Mushroom] = []
+        self._critters: list[_Critter] = []
+        self._fireflies: list[_Firefly] = []
+        self._leaves: list[_Leaf] = []
+        self._rain_drops: list[_RainDrop] = []
+        self._rain_splashes: list[_RainSplash] = []
+        self._has_rain = False
+        self._butterflies: list[_Butterfly] = []
+        self._wind = _Wind(
+            active=False, direction=1, wave_front_x=0.0, start_tick=0,
+            next_gust_tick=self._rng.randint(WIND_GUST_INTERVAL_MIN, WIND_GUST_INTERVAL_MAX),
+        )
 
         # Ghost-cell erasure: track positions emitted last frame
         self._prev_render_positions: set[tuple[int, int]] = set()
+
+        # Cursor-shake cancel
+        self._shake = CursorShakeDetector()
+        self._cancel_requested = False
 
     # -- Protocol callbacks --------------------------------------------------
 
     def on_pty_update(self, update: PTYUpdate) -> None:
         w, h = update.size
+        if self._shake.update(update.cursor):
+            self._cancel_requested = True
         if self._phase == Phase.IDLE:
             self._width = w
             self._height = h
@@ -294,6 +459,18 @@ class GroveEffect:
         self._bushes = []
         self._birds = []
         self._attached_flowers = []
+        self._mushrooms = []
+        self._critters = []
+        self._fireflies = []
+        self._leaves = []
+        self._rain_drops = []
+        self._rain_splashes = []
+        self._has_rain = False
+        self._butterflies = []
+        self._wind = _Wind(
+            active=False, direction=1, wave_front_x=0.0, start_tick=0,
+            next_gust_tick=self._rng.randint(WIND_GUST_INTERVAL_MIN, WIND_GUST_INTERVAL_MAX),
+        )
         self._phase_start = 0
         self._fade_start_tick = -1
         self._prev_render_positions = set()
@@ -338,6 +515,23 @@ class GroveEffect:
             bird.fy = max(0.0, min(float(new_h - 1), bird.fy))
             bird.target_x = max(0, min(new_w - 1, bird.target_x))
             bird.target_y = max(0, min(new_h - 1, bird.target_y))
+        for m in self._mushrooms:
+            m.x = max(0, min(new_w - 1, m.x))
+            m.base_y = max(0, min(new_h - 1, m.base_y))
+        for c in self._critters:
+            c.fy = max(0.0, min(float(new_h - 1), c.fy))
+            c.target_y = max(0, min(new_h - 1, c.target_y))
+        for ff in self._fireflies:
+            ff.fx = max(0.0, min(float(new_w - 1), ff.fx))
+            ff.fy = max(0.0, min(float(new_h - 1), ff.fy))
+        for lf in self._leaves:
+            lf.spawn_x = max(0, min(new_w - 1, lf.spawn_x))
+            lf.ground_y = new_h - 1
+        for drop in self._rain_drops:
+            drop.x = max(0, min(new_w - 1, drop.x))
+        for bf in self._butterflies:
+            bf.fx = max(0.0, min(float(new_w - 1), bf.fx))
+            bf.fy = max(0.0, min(float(new_h - 1), bf.fy))
 
     # -- Scene initialization ------------------------------------------------
 
@@ -469,6 +663,95 @@ class GroveEffect:
 
         # Attached flowers (vine/canopy flowers spawned dynamically)
         self._attached_flowers = []
+
+        # Rain (~12% of cycles)
+        self._has_rain = self._rng.random() < 0.12
+        self._rain_splashes = []
+        self._rain_drops = []
+        if self._has_rain:
+            for _ in range(RAIN_DROP_COUNT):
+                self._rain_drops.append(_RainDrop(
+                    x=self._rng.randint(0, w - 1),
+                    fy=self._rng.uniform(-h, 0),
+                    speed=self._rng.uniform(RAIN_SPEED_MIN, RAIN_SPEED_MAX),
+                    char="|", active=False,
+                ))
+
+        # Mushrooms: 2-5 per tree near trunk base
+        self._mushrooms = []
+        for tree in self._trees:
+            half_w = tree.trunk_width // 2
+            count = self._rng.randint(2, 5)
+            for _ in range(count):
+                sign = -1 if self._rng.random() < 0.5 else 1
+                offset = sign * self._rng.randint(1, half_w + 2)
+                mx = max(0, min(w - 1, tree.x + offset))
+                self._mushrooms.append(_Mushroom(
+                    x=mx, base_y=base_y,
+                    char=self._rng.choice(MUSHROOM_CHARS),
+                    color=self._rng.choice(MUSHROOM_COLORS),
+                    grow_delay=self._rng.randint(150, 300),
+                ))
+
+        # Crawling critters: 1-2 on random trees
+        self._critters = []
+        critter_count = self._rng.randint(1, 2)
+        critter_idxs = self._rng.sample(range(len(self._trees)), min(critter_count, len(self._trees)))
+        for idx in critter_idxs:
+            tree = self._trees[idx]
+            kind = "snail" if self._rng.random() < 0.5 else "caterpillar"
+            lo = int(tree.trunk_target * 0.3)
+            hi = int(tree.trunk_target * 0.7)
+            target_y = max(0, tree.base_y - self._rng.randint(lo, max(lo, hi)))
+            self._critters.append(_Critter(
+                tree_idx=idx, kind=kind,
+                color=self._rng.choice(CRITTER_COLORS),
+                fy=float(base_y), target_y=target_y,
+                speed=CRITTER_SPEED,
+                side=-1 if self._rng.random() < 0.5 else 1,
+            ))
+
+        # Wind state
+        self._wind = _Wind(
+            active=False, direction=1, wave_front_x=0.0, start_tick=0,
+            next_gust_tick=self._rng.randint(WIND_GUST_INTERVAL_MIN, WIND_GUST_INTERVAL_MAX),
+        )
+
+        # Fireflies (only if no rain)
+        self._fireflies = []
+        if not self._has_rain:
+            ff_count = self._rng.randint(FIREFLY_COUNT_MIN, FIREFLY_COUNT_MAX)
+            for _ in range(ff_count):
+                self._fireflies.append(_Firefly(
+                    fx=float(self._rng.randint(0, w - 1)),
+                    fy=float(base_y - self._rng.randint(0, 3)),
+                    color=self._rng.choice(FIREFLY_COLORS),
+                    char=self._rng.choice(FIREFLY_CHARS),
+                    spawn_delay=self._rng.randint(0, 120),
+                    vx=self._rng.uniform(-0.15, 0.15),
+                    vy=self._rng.uniform(-0.15, 0.05),
+                    alive=True,
+                ))
+
+        # Falling leaves — populated lazily when each tree's canopy finishes growing
+        self._leaves = []
+
+        # Butterflies (only if no rain)
+        self._butterflies = []
+        if not self._has_rain:
+            bf_count = self._rng.randint(BUTTERFLY_COUNT_MIN, BUTTERFLY_COUNT_MAX)
+            for _ in range(bf_count):
+                self._butterflies.append(_Butterfly(
+                    fx=self._rng.uniform(0, w - 1),
+                    fy=self._rng.uniform(0, h // 2),
+                    target_flower_idx=-1,
+                    color=self._rng.choice(BUTTERFLY_COLORS),
+                    char_idx=self._rng.randint(0, len(BUTTERFLY_CHARS) - 1),
+                    state="flying",
+                    landed_tick=0,
+                    land_duration=self._rng.randint(BUTTERFLY_LAND_MIN, BUTTERFLY_LAND_MAX),
+                    sine_offset=self._rng.uniform(0, math.pi * 2),
+                ))
 
     def _build_vine_path(self, t1: _Tree, t2: _Tree) -> list[tuple[int, int]]:
         """Build a vine path climbing t1's trunk then draping to t2 with parabolic sag."""
@@ -622,12 +905,13 @@ class GroveEffect:
                 canopy_t = local_t - trunk_done_t
                 if canopy_t > 0 and canopy_t % 5 == 0:
                     tree.canopy_r_current += 1
-            # Spawn canopy flowers when canopy is fully grown
+            # Spawn canopy flowers and leaves when canopy is fully grown
             if (tree.canopy_r_current == tree.canopy_r_target
                     and tree.canopy_r_current > 0
                     and not tree.canopy_flowers_spawned):
                 tree.canopy_flowers_spawned = True
                 self._spawn_canopy_flowers(tree)
+                self._spawn_canopy_leaves(tree)
 
         for bush in self._bushes:
             if ph_t < bush.grow_delay:
@@ -664,6 +948,33 @@ class GroveEffect:
                         self._attached_flowers.append(af)
                         break
 
+    def _spawn_canopy_leaves(self, tree: _Tree) -> None:
+        """Spawn falling leaves at the bottom edge of a tree's canopy ellipse."""
+        count = self._rng.randint(3, 6)
+        r = tree.canopy_r_current
+        ry = max(1, int(r * 0.7))
+        center_y = tree.branch_y
+        for _ in range(count):
+            dx = self._rng.randint(-(r - 1), r - 1)
+            norm_dx = dx / max(1, r)
+            dy = int(ry * math.sqrt(max(0.0, 1.0 - norm_dx * norm_dx)))
+            sx = tree.canopy_cx + dx
+            sy = center_y + dy
+            if 0 <= sx < self._width and 0 <= sy < self._height:
+                period = self._rng.uniform(1.5, 4.0)
+                self._leaves.append(_Leaf(
+                    spawn_x=sx, spawn_y=sy, ground_y=tree.base_y,
+                    fy=0.0, color=tree.canopy_color,
+                    char_idx=self._rng.randint(0, len(CANOPY_CHARS) - 1),
+                    last_char_tick=0,
+                    fall_rate=self._rng.uniform(0.08, 0.2),
+                    period=period,
+                    h_amplitude=self._rng.uniform(0.75, 2.25) * (1 + period * 0.7),
+                    v_amplitude=self._rng.uniform(0.3, 0.6) * (1 + period * 0.4),
+                    spawn_delay=self._rng.randint(0, 250),
+                    alive=True, draw_x=sx, draw_y=sy, state="canopy",
+                ))
+
     def _update_vine_chars(self) -> None:
         """Update vine character timers; swap chars when timer expires."""
         for v in self._vines:
@@ -681,6 +992,156 @@ class GroveEffect:
             if f.bloom_stage == 1 and t - f.bloom_tick >= 30:
                 f.bloom_stage = 2
                 f.pattern = self._generate_flower_pattern(f)
+
+    def _get_wind_offset(self, x: int) -> int:
+        w = self._wind
+        if not w.active:
+            return 0
+        tail = w.wave_front_x - WIND_DURATION * WIND_WAVE_SPEED * w.direction
+        lo = min(w.wave_front_x, tail)
+        hi = max(w.wave_front_x, tail)
+        return w.direction if lo <= x <= hi else 0
+
+    def _wind_tick(self) -> None:
+        ph_t = self._tick_count - self._phase_start
+        wind = self._wind
+        if wind.active:
+            wind.wave_front_x += WIND_WAVE_SPEED * wind.direction
+            lo = -WIND_DURATION * WIND_WAVE_SPEED
+            hi = self._width + WIND_DURATION * WIND_WAVE_SPEED
+            if wind.wave_front_x < lo or wind.wave_front_x > hi:
+                wind.active = False
+        elif ph_t >= wind.next_gust_tick:
+            if self._rng.random() < WIND_GUST_CHANCE:
+                wind.active = True
+                wind.direction = -1 if self._rng.random() < 0.5 else 1
+                wind.wave_front_x = 0.0 if wind.direction > 0 else float(self._width - 1)
+                wind.start_tick = ph_t
+            wind.next_gust_tick = ph_t + self._rng.randint(WIND_GUST_INTERVAL_MIN, WIND_GUST_INTERVAL_MAX)
+
+    def _mushrooms_tick(self) -> None:
+        ph_t = self._tick_count - self._phase_start
+        for m in self._mushrooms:
+            if not m.visible and ph_t >= m.grow_delay:
+                m.visible = True
+
+    def _critters_tick(self) -> None:
+        for c in self._critters:
+            if c.reached:
+                continue
+            c.fy -= c.speed
+            if c.fy <= c.target_y:
+                c.fy = float(c.target_y)
+                c.reached = True
+
+    def _fireflies_tick(self) -> None:
+        ph_t = self._tick_count - self._phase_start
+        for ff in self._fireflies:
+            if not ff.alive or ph_t < ff.spawn_delay:
+                continue
+            ff.vx += self._rng.uniform(-0.04, 0.04)
+            ff.vy += self._rng.uniform(-0.04, 0.04)
+            speed = math.sqrt(ff.vx * ff.vx + ff.vy * ff.vy)
+            if speed > FIREFLY_MAX_SPEED:
+                ff.vx = ff.vx / speed * FIREFLY_MAX_SPEED
+                ff.vy = ff.vy / speed * FIREFLY_MAX_SPEED
+            ff.fx += ff.vx + self._get_wind_offset(round(ff.fx)) * 0.5
+            ff.fy += ff.vy
+            if ff.fx < 0:
+                ff.fx = 0.0
+                ff.vx = abs(ff.vx)
+            elif ff.fx >= self._width:
+                ff.fx = float(self._width - 1)
+                ff.vx = -abs(ff.vx)
+            if ff.fy < 0:
+                ff.alive = False
+            elif ff.fy >= self._height:
+                ff.fy = float(self._height - 1)
+                ff.vy = -abs(ff.vy)
+
+    def _leaves_tick(self) -> None:
+        ph_t = self._tick_count - self._phase_start
+        t = self._tick_count
+        for lf in self._leaves:
+            if not lf.alive:
+                continue
+            if lf.state == "canopy":
+                if self._phase == Phase.PERCHING and ph_t >= lf.spawn_delay:
+                    lf.state = "falling"
+                continue
+            lf.fy += lf.fall_rate
+            distance = lf.fy
+            x_offset = (math.sin(distance / lf.period) * lf.h_amplitude
+                        + self._get_wind_offset(round(lf.spawn_x)))
+            y_offset = (math.cos(2 * distance / lf.period + math.pi) * lf.v_amplitude
+                        + lf.v_amplitude)
+            lf.draw_x = round(lf.spawn_x + x_offset)
+            lf.draw_y = round(lf.spawn_y + lf.fy + y_offset)
+            if t - lf.last_char_tick >= 8:
+                lf.char_idx = (lf.char_idx + 1) % len(CANOPY_CHARS)
+                lf.last_char_tick = t
+            if lf.draw_y >= lf.ground_y - 2:
+                lf.alive = False
+
+    def _rain_tick(self) -> None:
+        if not self._has_rain:
+            return
+        w = self._width
+        h = self._height
+        base_y = h - 1
+        t = self._tick_count
+        for drop in self._rain_drops:
+            if not drop.active:
+                drop.active = True
+                drop.x = self._rng.randint(0, w - 1)
+                drop.fy = self._rng.uniform(-5, 0)
+                drop.speed = self._rng.uniform(RAIN_SPEED_MIN, RAIN_SPEED_MAX)
+                drop.char = "|" if drop.speed > 0.85 else ":"
+            drop.fy += drop.speed
+            drop.x += self._get_wind_offset(drop.x)
+            drop.x = max(0, min(w - 1, drop.x))
+            if drop.fy >= base_y:
+                self._rain_splashes.append(_RainSplash(
+                    x=drop.x, y=base_y, birth_tick=t, duration=RAIN_SPLASH_DURATION,
+                ))
+                drop.active = False
+        self._rain_splashes = [s for s in self._rain_splashes if t - s.birth_tick < s.duration]
+
+    def _butterflies_tick(self) -> None:
+        t = self._tick_count
+        w = self._width
+        h = self._height
+        bloomed = [f for f in self._flowers + self._attached_flowers if f.bloom_stage == 2]
+        for bf in self._butterflies:
+            if bf.state == "landed":
+                if t - bf.landed_tick >= bf.land_duration:
+                    bf.state = "flying"
+                    bf.target_flower_idx = -1
+                continue
+            if bf.target_flower_idx < 0 and bloomed:
+                bf.target_flower_idx = self._rng.randint(0, len(bloomed) - 1)
+            if 0 <= bf.target_flower_idx < len(bloomed):
+                target = bloomed[bf.target_flower_idx]
+                tx, ty = float(target.x), float(target.base_y)
+            else:
+                tx, ty = float(w // 2), float(h // 2)
+            dx = tx - bf.fx
+            dy = ty - bf.fy
+            dist = math.sqrt(dx * dx + dy * dy)
+            if dist <= 1.0:
+                bf.fx, bf.fy = tx, ty
+                bf.state = "landed"
+                bf.landed_tick = t
+                bf.land_duration = self._rng.randint(BUTTERFLY_LAND_MIN, BUTTERFLY_LAND_MAX)
+                continue
+            step = min(BUTTERFLY_SPEED, dist)
+            bf.fx += ((dx / dist) * step + self._rng.uniform(-0.2, 0.2)
+                      + self._get_wind_offset(round(bf.fx)) * 0.3)
+            bf.fy += (dy / dist) * step + math.sin(t / 10 + bf.sine_offset) * 0.15
+            bf.fx = max(0.0, min(float(w - 1), bf.fx))
+            bf.fy = max(0.0, min(float(h - 1), bf.fy))
+            if t % BUTTERFLY_FLAP_PERIOD < BUTTERFLY_FLAP_PERIOD // 2:
+                bf.char_idx = (bf.char_idx + 1) % len(BUTTERFLY_CHARS)
 
     def _perch_tick(self) -> None:
         t = self._tick_count
@@ -737,13 +1198,20 @@ class GroveEffect:
             c = self._fade_color(color, fade_alpha) if fade_alpha < 1.0 else color
             buf[pos] = Cell(character=ch, coordinates=pos, fg=c, bg=None)
 
-        # Grass
+        # Grass (wind shifts the top character)
         for g in self._grass:
             for i in range(g.current_h):
                 gy = g.base_y - i
                 if 0 <= gy < h:
+                    is_top = i == g.current_h - 1
+                    gx = g.x + (self._get_wind_offset(g.x) if is_top else 0)
                     ch = g.chars[min(i, len(g.chars) - 1)]
-                    add_cell(g.x, gy, ch, g.color)
+                    add_cell(gx, gy, ch, g.color)
+
+        # Mushrooms
+        for m in self._mushrooms:
+            if m.visible:
+                add_cell(m.x, m.base_y, m.char, m.color)
 
         # Flowers (ground)
         for f in self._flowers:
@@ -815,6 +1283,15 @@ class GroveEffect:
                                 ch_idx = (cx + cy * 31) % len(CANOPY_CHARS)
                                 add_cell(cx, cy, CANOPY_CHARS[ch_idx], tree.canopy_color)
 
+        # Falling leaves
+        for lf in self._leaves:
+            if not lf.alive:
+                continue
+            if lf.state == "canopy":
+                add_cell(lf.spawn_x, lf.spawn_y, CANOPY_CHARS[lf.char_idx], lf.color)
+            else:
+                add_cell(lf.draw_x, lf.draw_y, CANOPY_CHARS[lf.char_idx], lf.color)
+
         # Bushes
         for bush in self._bushes:
             if bush.w_current <= 0 or bush.h_current <= 0:
@@ -832,6 +1309,21 @@ class GroveEffect:
                     if norm_x + norm_y <= 1.2:
                         ch_idx = (bx + by * 7) % len(BUSH_CHARS)
                         add_cell(bx, by, BUSH_CHARS[ch_idx], bush.color)
+
+        # Critters (climb tree trunks)
+        for c in self._critters:
+            if c.tree_idx >= len(self._trees):
+                continue
+            tree = self._trees[c.tree_idx]
+            char_arr = SNAIL_CHARS if c.kind == "snail" else CATERPILLAR_CHARS
+            cy = round(c.fy)
+            height_idx = tree.base_y - cy
+            trunk_off = (tree.trunk_offsets[height_idx]
+                         if 0 <= height_idx < len(tree.trunk_offsets) else 0)
+            half_w = tree.trunk_width // 2
+            cx = tree.x + trunk_off + c.side * (half_w + 1)
+            for j, ch in enumerate(char_arr):
+                add_cell(cx, cy + j, ch, c.color)
 
         # Attached flowers (vine/canopy — render on top of trees/vines)
         for f in self._attached_flowers:
@@ -865,6 +1357,26 @@ class GroveEffect:
                         add_cell(bx - 1, by, wing, bird.color)
                     if 0 <= bx < w:
                         add_cell(bx, by, BIRD_R_HEAD, bird.color)
+
+        # Butterflies (not during GROWING)
+        if self._phase != Phase.GROWING:
+            for bf in self._butterflies:
+                add_cell(round(bf.fx), round(bf.fy), BUTTERFLY_CHARS[bf.char_idx], bf.color)
+
+        # Rain
+        if self._has_rain:
+            for drop in self._rain_drops:
+                if drop.active:
+                    add_cell(drop.x, round(drop.fy), drop.char, RAIN_COLOR)
+            for s in self._rain_splashes:
+                add_cell(s.x, s.y, RAIN_SPLASH_CHAR, RAIN_COLOR)
+
+        # Fireflies (not during GROWING)
+        if not self._has_rain and self._phase != Phase.GROWING:
+            ff_ph_t = self._tick_count - self._phase_start
+            for ff in self._fireflies:
+                if ff.alive and ff_ph_t >= ff.spawn_delay:
+                    add_cell(round(ff.fx), round(ff.fy), ff.char, ff.color)
 
         # Erase ghost cells (positions rendered last frame that aren't rendered this frame)
         current_positions = set(buf.keys())
@@ -917,15 +1429,36 @@ class GroveEffect:
             self._phase = Phase.IDLE
             return []
 
+        # Cursor-shake cancel: force active phases to FADING
+        if self._cancel_requested and self._phase in (Phase.GROWING, Phase.PERCHING):
+            self._phase = Phase.FADING
+            self._fade_start_tick = self._tick_count
+        self._cancel_requested = False
+
         # Dispatch simulation
         if self._phase == Phase.GROWING:
             self._grow_stems_tick()
             self._grow_trees_bushes_tick()
             self._bloom_attached_flowers_tick()
+            self._mushrooms_tick()
+            if self._has_rain and self._tick_count - self._phase_start >= 200:
+                self._rain_tick()
         elif self._phase == Phase.PERCHING:
             self._perch_tick()
             self._update_vine_chars()
             self._bloom_attached_flowers_tick()
+            self._wind_tick()
+            self._critters_tick()
+            self._leaves_tick()
+            if self._has_rain:
+                self._rain_tick()
+            else:
+                self._fireflies_tick()
+                self._butterflies_tick()
+        elif self._phase == Phase.FADING:
+            self._leaves_tick()
+            if self._has_rain:
+                self._rain_tick()
 
         # Render before phase transition (freeze fix)
         result = self._render()

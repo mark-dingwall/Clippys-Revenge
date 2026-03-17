@@ -4,6 +4,7 @@ import json
 import pytest
 
 from clippy.effects.grove import (
+    BIRD_PERCH,
     FADE_DURATION,
     GROWING_DURATION,
     PERCHING_DURATION,
@@ -307,3 +308,73 @@ def test_attached_flowers_in_bounds(seed):
                 x, y = cell.coordinates
                 assert 0 <= x < 80, f"attached flower x={x} out of bounds"
                 assert 0 <= y < 24, f"attached flower y={y} out of bounds"
+
+
+# ---------------------------------------------------------------------------
+# Cursor-shake cancellation
+# ---------------------------------------------------------------------------
+
+def _shake_msgs():
+    return [make_pty_json(cursor=(x, 5)) for x in [10, 30, 10, 30, 10]]
+
+
+def test_cursor_shake_cancels_grove_growing():
+    """Cursor shake during GROWING transitions to FADING."""
+    effect = GroveEffect(seed=42, idle_secs=0)
+    effect.on_pty_update(make_pty_update(80, 24))
+    effect.tick()  # start effect
+    assert effect.phase == Phase.GROWING
+    step(effect, _shake_msgs())
+    assert effect.phase == Phase.FADING
+
+
+def test_cursor_shake_cancels_grove_perching():
+    """Cursor shake during PERCHING transitions to FADING."""
+    effect = GroveEffect(seed=42, idle_secs=0)
+    effect.on_pty_update(make_pty_update(80, 24))
+    assert run_to_phase(effect, Phase.PERCHING, max_ticks=GROWING_DURATION + 50)
+    step(effect, _shake_msgs())
+    assert effect.phase == Phase.FADING
+
+
+# ---------------------------------------------------------------------------
+# PERCHING behavioral test
+# ---------------------------------------------------------------------------
+
+def test_perching_emits_bird_character():
+    """At least one cell with BIRD_PERCH character appears during PERCHING."""
+    effect = GroveEffect(seed=42, idle_secs=0)
+    effect.on_pty_update(make_pty_update(80, 24))
+    assert run_to_phase(effect, Phase.PERCHING, max_ticks=GROWING_DURATION + 50)
+    found = False
+    for _ in range(200):
+        outputs = effect.tick()
+        for out in outputs:
+            for cell in out.cells:
+                if cell.character == BIRD_PERCH:
+                    found = True
+        if found or effect.phase != Phase.PERCHING:
+            break
+    assert found, "No bird perch character observed during PERCHING"
+
+
+# ---------------------------------------------------------------------------
+# Fading alpha
+# ---------------------------------------------------------------------------
+
+def test_fading_alpha_decreases_grove():
+    """At least one cell has fg alpha < 1.0 during FADING."""
+    effect = GroveEffect(seed=42, idle_secs=0)
+    effect.on_pty_update(make_pty_update(80, 24))
+    max_ticks = GROWING_DURATION + PERCHING_DURATION + 50
+    assert run_to_phase(effect, Phase.FADING, max_ticks=max_ticks)
+    found_dimmed = False
+    for _ in range(30):
+        outputs = effect.tick()
+        for out in outputs:
+            for cell in out.cells:
+                if cell.fg is not None and cell.fg[3] < 1.0:
+                    found_dimmed = True
+        if found_dimmed or effect.phase == Phase.DONE:
+            break
+    assert found_dimmed, "No dimmed cells observed during FADING"
