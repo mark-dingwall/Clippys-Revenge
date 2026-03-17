@@ -54,6 +54,12 @@ clippy --fps 60
 
 **invaders** — Space invaders rain pixel-art chaos onto your code. Watch them glide across the top of your terminal before the inevitable bombing run.
 
+**grove** — A vibrant grove grows from the terminal bottom, birds perch in the branches, then everything gently fades.
+
+**microbes** — Colorful microbes dash along curved paths across your screen before fading out.
+
+**mascot** — Clippy watches from the corner with gleeful menace. The longer you idle, the more excited he gets.
+
 ## Hacking / Writing Your Own Effect
 
 See [CLAUDE.md](CLAUDE.md) for architecture details, wire format, and testing patterns. Effects live in `clippy/effects/` — each is a standalone Python module with an `EFFECT_META` dict and a class implementing `on_pty_update`, `on_resize`, and `tick`.
