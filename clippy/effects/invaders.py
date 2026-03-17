@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from enum import IntEnum
 
 from clippy.harness import run
-from clippy.types import Cell, Color, OutputCells, OutputMessage, PTYUpdate, TTYResize
+from clippy.types import Cell, Color, CursorShakeDetector, OutputCells, OutputMessage, PTYUpdate, TTYResize
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -30,6 +30,7 @@ BOMB_SPAWN_PROB    = 0.07  # probability per alien per tick to drop a bomb
 FLUNG_DURATION     = 6     # ticks a flung character remains visible
 
 RUBBLE_THRESHOLD   = 0.65  # fraction of code zone cells rubbled → FADING
+ACTIVE_DURATION    = 1050  # ~35s @30fps — hard cap on ACTIVE phase length
 
 # Bombardment
 BOMBARDMENT_DURATION  = 150   # ticks (~5s @30fps)
@@ -251,6 +252,13 @@ class InvadersEffect:
         # Fade
         self._fade_start_tick = 0
 
+        # Active-phase duration cap
+        self._active_start_tick = 0
+
+        # Cursor-shake cancel
+        self._shake = CursorShakeDetector()
+        self._cancel_requested = False
+
         # Ghost-cell erasure: track positions emitted last frame
         self._prev_render_positions: set[tuple[int, int]] = set()
 
@@ -286,6 +294,8 @@ class InvadersEffect:
 
     def on_pty_update(self, update: PTYUpdate) -> None:
         w, h = update.size
+        if self._shake.update(update.cursor):
+            self._cancel_requested = True
         if self._phase == Phase.IDLE:
             self._width, self._height = w, h
             self._compute_zones(w, h)
@@ -406,6 +416,9 @@ class InvadersEffect:
 
     def _check_phase(self) -> None:
         if self._phase != Phase.ACTIVE:
+            return
+        if self._tick_count - self._active_start_tick >= ACTIVE_DURATION:
+            self._start_fading()
             return
         if self._code_zone_cells > 0:
             if self._rubble_count / self._code_zone_cells >= RUBBLE_THRESHOLD:
@@ -816,6 +829,7 @@ class InvadersEffect:
             if self._tick_count - self._bombardment_start >= BOMBARDMENT_DURATION:
                 self._phase = Phase.ACTIVE
                 self._top_fade_start = self._tick_count
+                self._active_start_tick = self._tick_count
                 # Stagger alien spawning per lane (lane 0 first, each subsequent lane waits more)
                 self._lane_last_exit = [
                     self._tick_count - ALIEN_SPAWN_INTERVAL + lane * LANE_STAGGER_TICKS
@@ -826,6 +840,11 @@ class InvadersEffect:
             return self._render_bombardment()
 
         elif self._phase == Phase.ACTIVE:
+            # Cursor-shake cancel
+            if self._cancel_requested:
+                self._start_fading()
+                self._cancel_requested = False
+                return self._render_active()
             self._march_timer += 1
             self._bomb_timer += 1
             self._do_aliens()

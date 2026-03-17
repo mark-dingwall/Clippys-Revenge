@@ -4,6 +4,7 @@ import json
 import pytest
 
 from clippy.effects.invaders import (
+    ACTIVE_DURATION,
     ALIEN_COLORS,
     ALIEN_KILL_COLOR,
     ALIEN_SPRITE_HEIGHT,
@@ -528,4 +529,45 @@ def _is_approx_any_alien_color(fg, tol=0.15):
     return any(
         all(abs(fg[i] - ref[i]) <= tol for i in range(3))
         for ref in ALIEN_COLORS
+    )
+
+
+# ---------------------------------------------------------------------------
+# Duration cap and cursor-shake cancellation
+# ---------------------------------------------------------------------------
+
+def test_active_duration_cap():
+    """ACTIVE phase ends after ACTIVE_DURATION ticks even when rubble threshold isn't met."""
+    effect = InvadersEffect(seed=0, idle_secs=0)
+    effect.on_pty_update(make_pty_update(80, 24))
+    assert run_to_phase(effect, Phase.ACTIVE, max_ticks=500), "Never reached ACTIVE"
+
+    # Prevent rubble threshold from triggering so only the time limit fires
+    effect._rubble_count = 0
+    effect._code_zone_cells = 10_000
+
+    for _ in range(ACTIVE_DURATION + 10):
+        effect.tick()
+        if effect.phase == Phase.FADING:
+            break
+
+    assert effect.phase == Phase.FADING, (
+        f"Expected FADING after ACTIVE_DURATION ticks, got {effect.phase.name}"
+    )
+
+
+def test_cursor_shake_cancels_invaders():
+    """Cursor shake during ACTIVE transitions immediately to FADING."""
+    effect = InvadersEffect(seed=0, idle_secs=0)
+    effect.on_pty_update(make_pty_update(80, 24))
+    assert run_to_phase(effect, Phase.ACTIVE, max_ticks=500), "Never reached ACTIVE"
+
+    # Simulate 3 left-right reversals (5 cursor positions needed)
+    shake_xs = [10, 30, 10, 30, 10]
+    for x in shake_xs:
+        effect.on_pty_update(PTYUpdate(size=(80, 24), cells=[], cursor=(x, 0)))
+
+    effect.tick()
+    assert effect.phase == Phase.FADING, (
+        f"Expected FADING after cursor shake, got {effect.phase.name}"
     )
