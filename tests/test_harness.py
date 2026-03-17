@@ -439,6 +439,130 @@ def test_run_broken_pipe_exits_cleanly():
     assert effect.tick_count >= 1
 
 
+def test_run_clear_frame_sent_when_effect_goes_quiet():
+    """After returning cells, a one-shot empty OutputCells is sent when tick() returns []."""
+    lines = []
+    reader = MessageReader()
+    cell = Cell(character="X", coordinates=(0, 0), fg=(1.0, 0.0, 0.0, 1.0), bg=None)
+
+    class ActiveThenQuiet:
+        def __init__(self):
+            self.tick_count = 0
+
+        def on_pty_update(self, update):
+            pass
+
+        def on_resize(self, resize):
+            pass
+
+        def tick(self):
+            self.tick_count += 1
+            if self.tick_count == 1:
+                return [OutputCells(cells=[cell])]
+            if self.tick_count == 3:
+                reader.stop()
+                raise KeyboardInterrupt
+            return []
+
+    run(
+        ActiveThenQuiet(),
+        fps=1000,
+        writer=lambda s: lines.append(s),
+        flush=lambda: None,
+        reader=reader,
+    )
+
+    assert len(lines) == 2
+    data0 = json.loads(lines[0])
+    assert "output_cells" in data0
+    assert len(data0["output_cells"]) == 1  # the real frame
+
+    data1 = json.loads(lines[1])
+    assert "output_cells" in data1
+    assert data1["output_cells"] == []  # the clear frame
+
+
+def test_run_clear_frame_sent_only_once():
+    """The clear frame is sent exactly once, not every idle tick."""
+    lines = []
+    reader = MessageReader()
+    cell = Cell(character="X", coordinates=(0, 0), fg=(1.0, 0.0, 0.0, 1.0), bg=None)
+
+    class ActiveThenManyQuiet:
+        def __init__(self):
+            self.tick_count = 0
+
+        def on_pty_update(self, update):
+            pass
+
+        def on_resize(self, resize):
+            pass
+
+        def tick(self):
+            self.tick_count += 1
+            if self.tick_count == 1:
+                return [OutputCells(cells=[cell])]
+            if self.tick_count >= 5:
+                reader.stop()
+                raise KeyboardInterrupt
+            return []
+
+    run(
+        ActiveThenManyQuiet(),
+        fps=1000,
+        writer=lambda s: lines.append(s),
+        flush=lambda: None,
+        reader=reader,
+    )
+
+    # One real frame + one clear frame; subsequent idle ticks write nothing
+    assert len(lines) == 2
+    assert json.loads(lines[1])["output_cells"] == []
+
+
+def test_run_clear_frame_sent_for_output_pixels():
+    """After returning pixels, a one-shot empty OutputPixels is sent when tick() returns []."""
+    lines = []
+    reader = MessageReader()
+    pixel = Pixel(coordinates=(10, 5), color=(0.0, 1.0, 0.0, 1.0))
+
+    class PixelsThenQuiet:
+        def __init__(self):
+            self.tick_count = 0
+
+        def on_pty_update(self, update):
+            pass
+
+        def on_resize(self, resize):
+            pass
+
+        def tick(self):
+            self.tick_count += 1
+            if self.tick_count == 1:
+                return [OutputPixels(pixels=[pixel])]
+            if self.tick_count == 3:
+                reader.stop()
+                raise KeyboardInterrupt
+            return []
+
+    run(
+        PixelsThenQuiet(),
+        fps=1000,
+        writer=lambda s: lines.append(s),
+        flush=lambda: None,
+        reader=reader,
+    )
+
+    assert len(lines) == 2
+    data0 = json.loads(lines[0])
+    assert "output_pixels" in data0
+    assert len(data0["output_pixels"]) == 1  # the real frame
+
+    data1 = json.loads(lines[1])
+    assert "output_pixels" in data1
+    assert data1["output_pixels"] == []  # the clear frame
+
+
 def test_run_to_json_exception_continues():
     """Bad to_json() is caught, loop continues."""
     reader = MessageReader()

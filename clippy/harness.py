@@ -16,7 +16,9 @@ from pathlib import Path
 from typing import Protocol
 
 from clippy.types import (
+    OutputCells,
     OutputMessage,
+    OutputPixels,
     PTYUpdate,
     TTYResize,
     from_json,
@@ -156,6 +158,10 @@ def run(
             except Exception:
                 logger.exception("Effect callback error")
 
+    # Track last output type so we can send a one-shot clear when an effect
+    # goes quiet — otherwise tattoy keeps re-compositing the last frame.
+    _last_output_type: type | None = None
+
     try:
         while not shutdown.is_set():
             frame_start = clock()
@@ -169,8 +175,23 @@ def run(
                 outputs = []
 
             if outputs:
+                _last_output_type = type(outputs[0])
+                write_outputs: list[OutputMessage] = outputs
+            elif _last_output_type is not None:
+                # Effect just went quiet — send one clear frame to wipe the layer.
+                if _last_output_type is OutputCells:
+                    write_outputs = [OutputCells(cells=[])]
+                elif _last_output_type is OutputPixels:
+                    write_outputs = [OutputPixels(pixels=[])]
+                else:
+                    write_outputs = []
+                _last_output_type = None
+            else:
+                write_outputs = []
+
+            if write_outputs:
                 try:
-                    for out in outputs:
+                    for out in write_outputs:
                         writer(out.to_json() + "\n")
                     flush()
                 except (BrokenPipeError, OSError):
