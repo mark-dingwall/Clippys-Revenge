@@ -7,6 +7,7 @@ import pytest
 
 from clippy.types import (
     Cell,
+    CursorShakeDetector,
     Pixel,
     PTYUpdate,
     TTYResize,
@@ -61,6 +62,12 @@ GOLDEN_OUTPUT_CASES = [
         "output_pixels_zero_alpha.json",
         OutputPixels(pixels=[
             Pixel(coordinates=(0, 0), color=(1.0, 0.0, 0.0, 0.0)),
+        ]),
+    ),
+    (
+        "output_pixels_null_color.json",
+        OutputPixels(pixels=[
+            Pixel(coordinates=(5, 10), color=None),
         ]),
     ),
 ]
@@ -243,6 +250,84 @@ def test_output_text_with_both_colors():
     '{"pty_update": {"size": [80, 24], "cells": [], "cursor": [0]}}',  # cursor length 1
     '{"pty_update": {"size": [80, 24], "cells": [{"character": "A", "coordinates": [0], "fg": null, "bg": null}]}}',  # coordinates length 1
     '{"pty_update": {"size": [80, 24], "cells": [{"character": "A", "coordinates": [0, 0], "fg": [1.0, 0.0], "bg": null}]}}',  # fg length 2
+    # tty_resize missing fields
+    '{"tty_resize": {"width": 80}}',       # missing height
+    '{"tty_resize": {"height": 24}}',      # missing width
+    '{"tty_resize": {}}',                  # both missing
 ])
 def test_malformed_input_returns_none(raw):
     assert from_json(raw) is None
+
+
+# --- CursorShakeDetector ---
+
+class TestCursorShakeDetector:
+    def test_first_call_never_fires(self):
+        d = CursorShakeDetector()
+        assert d.update((10, 5)) is False
+
+    def test_minimal_sequence_fires(self):
+        """5 positions [0,5,0,5,0] → 3 reversals → True on 5th call."""
+        d = CursorShakeDetector()
+        results = []
+        for x in [0, 5, 0, 5, 0]:
+            results.append(d.update((x, 0)))
+        assert results[-1] is True
+
+    def test_constant_x_never_fires(self):
+        d = CursorShakeDetector()
+        for _ in range(100):
+            assert d.update((20, 0)) is False
+
+    def test_vertical_only_never_fires(self):
+        d = CursorShakeDetector()
+        for y in range(100):
+            assert d.update((10, y)) is False
+
+    def test_monotonic_rightward_never_fires(self):
+        """Simulates typing — cursor moves only rightward."""
+        d = CursorShakeDetector()
+        for x in range(80):
+            assert d.update((x, 0)) is False
+
+    def test_reusable_after_trigger(self):
+        d = CursorShakeDetector()
+        # First shake
+        for x in [0, 5, 0, 5, 0]:
+            d.update((x, 0))
+        # Internal state should have been cleared
+        assert d._reversal_ticks == []
+        # Second shake should also fire
+        results = []
+        for x in [10, 30, 10, 30, 10]:
+            results.append(d.update((x, 0)))
+        assert any(r is True for r in results), "Second shake should also trigger"
+
+    def test_reversals_expire_after_window(self):
+        """2 reversals + 61 idle ticks → pruned → 3rd alone doesn't fire."""
+        d = CursorShakeDetector()
+        # Build 2 reversals
+        d.update((0, 0))
+        d.update((10, 0))   # direction: right
+        d.update((5, 0))    # reversal 1
+        d.update((15, 0))   # reversal 2
+        # Idle for 61 ticks (same position = no direction change, no reversal)
+        for _ in range(61):
+            d.update((15, 0))
+        # Now one more reversal — old ones should be pruned
+        d.update((5, 0))    # reversal 3, but old 2 are gone
+        assert d.update((15, 0)) is False  # only 1 recent reversal in window
+
+    def test_reversals_within_window_fires(self):
+        """2 reversals + 55 idle ticks → still in window → 3rd reversal fires."""
+        d = CursorShakeDetector()
+        d.update((0, 0))
+        d.update((10, 0))   # direction: right
+        d.update((5, 0))    # reversal 1
+        d.update((15, 0))   # reversal 2
+        # Idle for 55 ticks (within 60-tick window)
+        for _ in range(55):
+            d.update((15, 0))
+        # 3rd reversal
+        result = d.update((5, 0))
+        assert result is True

@@ -88,6 +88,43 @@ InputMessage = PTYUpdate | TTYResize
 OutputMessage = OutputText | OutputCells | OutputPixels
 
 
+class CursorShakeDetector:
+    """Detects rapid left-right cursor shake: 3 x-axis reversals within 2 seconds."""
+
+    WINDOW_TICKS = 60   # 2s at 30fps
+    REVERSALS_NEEDED = 3
+
+    def __init__(self) -> None:
+        self._last_x: int | None = None
+        self._last_x_dir: int = 0          # +1 or -1, last non-zero dx direction
+        self._reversal_ticks: list[int] = []  # tick numbers of each reversal
+        self._tick: int = 0
+
+    def update(self, pos: tuple[int, int]) -> bool:
+        """Record cursor position, return True if shake gesture completed."""
+        self._tick += 1
+        x = pos[0]
+
+        if self._last_x is not None:
+            dx = x - self._last_x
+            if dx != 0:
+                direction = 1 if dx > 0 else -1
+                if self._last_x_dir != 0 and direction != self._last_x_dir:
+                    self._reversal_ticks.append(self._tick)
+                self._last_x_dir = direction
+
+        self._last_x = x
+
+        # Prune reversals outside the window
+        cutoff = self._tick - self.WINDOW_TICKS
+        self._reversal_ticks = [t for t in self._reversal_ticks if t > cutoff]
+
+        if len(self._reversal_ticks) >= self.REVERSALS_NEEDED:
+            self._reversal_ticks.clear()
+            return True
+        return False
+
+
 def _validated_tuple(seq, length: int) -> tuple:
     """Convert to tuple and verify expected length."""
     t = tuple(seq)
