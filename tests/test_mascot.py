@@ -359,7 +359,7 @@ def _shake_msgs():
             "cells": [],
             "cursor": [x, 0],
         }
-    }) for x in [10, 30, 10, 30, 10]]
+    }) for x in [10, 30, 10, 30, 10, 30, 10]]
 
 
 def test_cursor_shake_in_watching_skips_to_imminent_deep():
@@ -372,6 +372,31 @@ def test_cursor_shake_in_watching_skips_to_imminent_deep():
     assert effect.phase == Phase.WATCHING
     step(effect, _shake_msgs())
     assert effect.phase == Phase.IMMINENT_DEEP
+
+
+def test_shake_ignored_in_imminent_deep():
+    """Shake during IMMINENT_DEEP doesn't accumulate reversals in the detector."""
+    effect = MascotEffect(idle_secs=300)
+    effect.on_pty_update(make_pty_update(80, 24))
+    for _ in range(5):
+        effect.tick()
+    # Jump to IMMINENT_DEEP — detector should be fully reset after firing
+    step(effect, _shake_msgs())
+    assert effect.phase == Phase.IMMINENT_DEEP
+    assert effect._shake._reversal_ticks == []
+    assert effect._shake._last_x_dir == 0
+    # Shake during IMMINENT_DEEP must not touch the detector
+    step(effect, _shake_msgs())
+    assert effect._shake._reversal_ticks == []
+
+
+def test_shake_ignored_in_cackling():
+    """Shake during CACKLING doesn't accumulate reversals in the detector."""
+    effect = MascotEffect(idle_secs=0)
+    effect.on_pty_update(make_pty_update(80, 24))
+    assert run_to_phase(effect, Phase.CACKLING)
+    step(effect, _shake_msgs())
+    assert effect._shake._reversal_ticks == []
 
 
 def test_cursor_shake_recalculates_cackle_timing():

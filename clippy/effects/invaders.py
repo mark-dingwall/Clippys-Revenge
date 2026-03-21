@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from enum import IntEnum
 
 from clippy.harness import run
-from clippy.types import Cell, Color, CursorShakeDetector, OutputCells, OutputMessage, PTYUpdate, TTYResize
+from clippy.types import Cell, Color, OutputCells, OutputMessage, PTYUpdate, TTYResize
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -255,10 +255,6 @@ class InvadersEffect:
         # Active-phase duration cap
         self._active_start_tick = 0
 
-        # Cursor-shake cancel
-        self._shake = CursorShakeDetector()
-        self._cancel_requested = False
-
         # Ghost-cell erasure: track positions emitted last frame
         self._prev_render_positions: set[tuple[int, int]] = set()
 
@@ -294,8 +290,6 @@ class InvadersEffect:
 
     def on_pty_update(self, update: PTYUpdate) -> None:
         w, h = update.size
-        if self._shake.update(update.cursor):
-            self._cancel_requested = True
         if self._phase == Phase.IDLE:
             self._width, self._height = w, h
             self._compute_zones(w, h)
@@ -809,6 +803,15 @@ class InvadersEffect:
     def phase(self) -> Phase:
         return self._phase
 
+    def cancel(self) -> None:
+        """Begin fading from any active phase."""
+        if self._phase in (Phase.BOMBARDMENT, Phase.ACTIVE):
+            self._start_fading()
+
+    @property
+    def is_done(self) -> bool:
+        return self._phase == Phase.DONE
+
     def tick(self) -> list[OutputMessage]:
         self._tick_count += 1
 
@@ -840,11 +843,6 @@ class InvadersEffect:
             return self._render_bombardment()
 
         elif self._phase == Phase.ACTIVE:
-            # Cursor-shake cancel
-            if self._cancel_requested:
-                self._start_fading()
-                self._cancel_requested = False
-                return self._render_active()
             self._march_timer += 1
             self._bomb_timer += 1
             self._do_aliens()

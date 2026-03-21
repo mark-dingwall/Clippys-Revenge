@@ -267,10 +267,10 @@ class TestCursorShakeDetector:
         assert d.update((10, 5)) is False
 
     def test_minimal_sequence_fires(self):
-        """5 positions [0,5,0,5,0] → 3 reversals → True on 5th call."""
+        """7 positions [0,5,0,5,0,5,0] → 5 reversals → True on 7th call."""
         d = CursorShakeDetector()
         results = []
-        for x in [0, 5, 0, 5, 0]:
+        for x in [0, 5, 0, 5, 0, 5, 0]:
             results.append(d.update((x, 0)))
         assert results[-1] is True
 
@@ -293,15 +293,24 @@ class TestCursorShakeDetector:
     def test_reusable_after_trigger(self):
         d = CursorShakeDetector()
         # First shake
-        for x in [0, 5, 0, 5, 0]:
+        for x in [0, 5, 0, 5, 0, 5, 0]:
             d.update((x, 0))
         # Internal state should have been cleared
         assert d._reversal_ticks == []
         # Second shake should also fire
         results = []
-        for x in [10, 30, 10, 30, 10]:
+        for x in [10, 30, 10, 30, 10, 30, 10]:
             results.append(d.update((x, 0)))
         assert any(r is True for r in results), "Second shake should also trigger"
+
+    def test_state_fully_reset_after_trigger(self):
+        """After shake fires, _last_x and _last_x_dir are cleared to prevent free reversals."""
+        d = CursorShakeDetector()
+        for x in [0, 5, 0, 5, 0, 5, 0]:
+            d.update((x, 0))
+        assert d._last_x is None
+        assert d._last_x_dir == 0
+        assert d._reversal_ticks == []
 
     def test_reversals_expire_after_window(self):
         """2 reversals + 61 idle ticks → pruned → 3rd alone doesn't fire."""
@@ -311,23 +320,66 @@ class TestCursorShakeDetector:
         d.update((10, 0))   # direction: right
         d.update((5, 0))    # reversal 1
         d.update((15, 0))   # reversal 2
-        # Idle for 61 ticks (same position = no direction change, no reversal)
+        # 61 idle ticks (same position) — advances the tick counter without movement
         for _ in range(61):
             d.update((15, 0))
         # Now one more reversal — old ones should be pruned
         d.update((5, 0))    # reversal 3, but old 2 are gone
         assert d.update((15, 0)) is False  # only 1 recent reversal in window
 
+    def test_reset_clears_state(self):
+        """reset() clears all accumulated state but keeps monotonic tick counter."""
+        d = CursorShakeDetector()
+        # Build some state
+        d.update((0, 0))
+        d.update((10, 0))
+        d.update((5, 0))  # reversal
+        assert len(d._reversal_ticks) == 1
+        assert d._last_x is not None
+        assert d._last_x_dir != 0
+        old_tick = d._tick
+
+        d.reset()
+
+        assert d._last_x is None
+        assert d._last_x_dir == 0
+        assert d._reversal_ticks == []
+        # Tick counter is NOT reset — it's monotonic for window pruning
+        assert d._tick == old_tick
+
+    def test_reset_prevents_carryover(self):
+        """After reset(), old reversals don't count toward the next gesture."""
+        d = CursorShakeDetector()
+        # Build 4 reversals (one short of triggering)
+        d.update((0, 0))
+        d.update((10, 0))
+        d.update((5, 0))    # reversal 1
+        d.update((15, 0))   # reversal 2
+        d.update((5, 0))    # reversal 3
+        d.update((15, 0))   # reversal 4
+        assert len(d._reversal_ticks) == 4
+
+        d.reset()
+
+        # A single reversal should not trigger (would need 5 fresh ones)
+        d.update((0, 0))
+        d.update((10, 0))
+        result = d.update((5, 0))
+        assert result is False
+        assert len(d._reversal_ticks) == 1
+
     def test_reversals_within_window_fires(self):
-        """2 reversals + 55 idle ticks → still in window → 3rd reversal fires."""
+        """4 reversals + 50 idle ticks → still in window → 5th reversal fires."""
         d = CursorShakeDetector()
         d.update((0, 0))
         d.update((10, 0))   # direction: right
         d.update((5, 0))    # reversal 1
         d.update((15, 0))   # reversal 2
-        # Idle for 55 ticks (within 60-tick window)
-        for _ in range(55):
+        d.update((5, 0))    # reversal 3
+        d.update((15, 0))   # reversal 4
+        # 50 idle ticks (within 60-tick window)
+        for _ in range(50):
             d.update((15, 0))
-        # 3rd reversal
+        # 5th reversal
         result = d.update((5, 0))
         assert result is True

@@ -47,15 +47,20 @@ User runs `clippy` CLI
 
 **Core modules:**
 
-- `clippy/types.py` — Protocol dataclasses (`Cell`, `Pixel`, `PTYUpdate`, `TTYResize`, `OutputText`, `OutputCells`, `OutputPixels`) and JSON serialization. `from_json()` never raises — returns `None` for any malformed input. Also contains `CursorShakeDetector` (detects 3 x-axis reversals within 60 ticks).
+- `clippy/types.py` — Protocol dataclasses (`Cell`, `Pixel`, `PTYUpdate`, `TTYResize`, `OutputText`, `OutputCells`, `OutputPixels`) and JSON serialization. `from_json()` never raises — returns `None` for any malformed input. Also contains `CursorShakeDetector` (detects 5 x-axis reversals within 60 ticks; has `reset()` to clear state at phase boundaries).
 - `clippy/harness.py` — `Effect` protocol, `step()` (single-tick test seam), and `run()` (threaded stdin/stdout protocol loop with frame-rate control).
-- `clippy/effects/` — Individual effect plugins. Each has `EFFECT_META` dict and `if __name__ == "__main__": run(Effect())`.
-- `clippy/launcher.py` — CLI entry point. Discovers effects, generates tattoy config, execs tattoy.
+- `clippy/unified.py` — `UnifiedEffect` wraps an inner effect class + mascot overlay in a single state machine: `WATCHING → IMMINENT_EARLY → IMMINENT_DEEP → ACTIVE → CACKLING → loop`. Single `CursorShakeDetector` governs cursor-shake gestures (only accepted during WATCHING and ACTIVE phases).
+- `clippy/unified_runner.py` — Tattoy plugin entry point. Reads `CLIPPY_EFFECT` env var, wraps effect class in `UnifiedEffect`, runs protocol loop.
+- `clippy/effects/` — Individual effect plugins. Each has `EFFECT_META` dict, `cancel()` method, `is_done` property, and `if __name__ == "__main__": run(Effect())`.
+- `clippy/effects/mascot.py` — Standalone mascot overlay (used only for `--demo mascot`). In tattoy mode, mascot rendering is handled by `UnifiedEffect`.
+- `clippy/noise.py` — Pure Python 3D simplex noise (`noise3(x, y, z) -> float in [-1.0, 1.0]`). Used by fire and grove for flow fields. No dependencies.
+- `clippy/launcher.py` — CLI entry point. Discovers effects, generates tattoy config, execs tattoy. Uses `unified_runner.py` as the single plugin entry point (no separate mascot plugin).
 - `clippy/demo.py` — ANSI terminal renderer for `--demo` mode (no tattoy required).
+- `clippy/ide_template.py` — Generates a fake VS Code-style Python editor background for `--demo` mode. Effects render on top, visually destroying the code.
 - `bin/clippy` — Shell wrapper that sets `PYTHONPATH` and execs `python3 -m clippy.launcher`.
 - `install.sh` / `uninstall.sh` — Install to `~/.local/share/clippys-revenge`, symlink `bin/clippy` to `~/.local/bin/clippy`.
 
-**Effect protocol:** Every effect class implements three methods: `on_pty_update(PTYUpdate)`, `on_resize(TTYResize)`, `tick() -> list[OutputMessage]`.
+**Effect protocol:** Every effect class implements: `on_pty_update(PTYUpdate)`, `on_resize(TTYResize)`, `tick() -> list[OutputMessage]`, `cancel()`, and `is_done` property.
 
 **Testing seam:** `step(effect, messages) -> list[str]` is the primary test surface for effects — it parses messages, dispatches callbacks, calls tick, and returns serialized JSON. No threading involved. Use this instead of `run()` for effect unit tests.
 
@@ -93,12 +98,13 @@ The golden files in `tests/golden/` are the source of truth for wire format.
 - **Property-based tests** for effects: assert coordinates in bounds, colors in `[0.0, 1.0]`, correct output types — parametrized over multiple seeds.
 - **`MessageReader`** helper in `test_harness.py` prevents premature shutdown in `run()` tests (plain `io.StringIO` hits EOF instantly, setting the shutdown event).
 - **Malformed input resilience:** `from_json()` returns `None` for empty lines, whitespace, invalid JSON, unknown keys, null payloads — harness must never crash on bad input.
-- Effect lifecycles:
-  - Fire: `IDLE → SPREADING → BURNING → WASTELAND → DONE` (or any active phase → `CANCEL_FADING → DONE` via cursor-shake)
-  - Invaders: `IDLE → BOMBARDMENT → ACTIVE → FADING → DONE` (ACTIVE capped at 1050 ticks; cursor-shake skips to FADING)
-  - Grove: `IDLE → GROWING → PERCHING → FADING → DONE` (cursor-shake skips to FADING)
-  - Microbes: `IDLE → SWARMING → FADING → DONE` (cursor-shake skips to FADING)
-  - Mascot: `WATCHING → IMMINENT_EARLY → IMMINENT_DEEP → CACKLING → reset` (cursor-shake jumps to IMMINENT_DEEP)
+- **Unified lifecycle** (`UnifiedEffect`): `WATCHING → IMMINENT_EARLY → IMMINENT_DEEP → ACTIVE (inner effect) → CACKLING → loop` (live) or `→ DONE` (demo). Cursor-shake: WATCHING → jump to IMMINENT_DEEP; ACTIVE → cancel inner effect; all other phases ignore L+R completely.
+- Inner effect lifecycles (standalone, driven by `cancel()` / `is_done`):
+  - Fire: `IDLE → SPREADING → BURNING → WASTELAND → DONE` (or `cancel()` → `CANCEL_FADING → DONE`)
+  - Invaders: `IDLE → BOMBARDMENT → ACTIVE → FADING → DONE` (ACTIVE capped at 1050 ticks; `cancel()` skips to FADING)
+  - Grove: `IDLE → GROWING → PERCHING → FADING → DONE` (`cancel()` skips to FADING)
+  - Microbes: `IDLE → SWARMING → FADING → DONE` (`cancel()` skips to FADING)
+  - Mascot: standalone only (`--demo mascot`): `WATCHING → IMMINENT_EARLY → IMMINENT_DEEP → CACKLING → reset`
 
 ## Mocking Quick Reference
 

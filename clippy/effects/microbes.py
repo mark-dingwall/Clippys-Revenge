@@ -10,11 +10,11 @@ from __future__ import annotations
 import math
 import os
 import random
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import IntEnum
 
 from clippy.harness import run
-from clippy.types import Color, CursorShakeDetector, OutputMessage, OutputPixels, PTYUpdate, Pixel, TTYResize
+from clippy.types import Cell, Color, OutputCells, OutputMessage, PTYUpdate, TTYResize
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -51,8 +51,11 @@ DEST_RAD = 20
 RAND_RAD = 20
 DIST_R_MULT = 30.0
 
-# Trails
-TRAIL_LEN = 20
+# Trail rendering (matches JS DASH_TRAIL / DASH_ACCURACY)
+DASH_TRAIL = 0.15       # fraction of curve path visible as trail
+TRAIL_SAMPLES = 9       # sample points along trail (JS DASH_ACCURACY)
+MIN_STROKE = 2          # min pixel width of microbe body
+MAX_STROKE = 4          # max pixel width
 
 
 # ---------------------------------------------------------------------------
@@ -103,6 +106,48 @@ def _catmull_rom(p0: float, p1: float, p2: float, p3: float, t: float) -> float:
     )
 
 
+def _bresenham_line(x0: int, y0: int, x1: int, y1: int) -> list[tuple[int, int]]:
+    """Integer line rasterization. Returns all pixels from (x0,y0) to (x1,y1)."""
+    points: list[tuple[int, int]] = []
+    dx = abs(x1 - x0)
+    dy = abs(y1 - y0)
+    sx = 1 if x0 < x1 else -1
+    sy = 1 if y0 < y1 else -1
+    err = dx - dy
+    while True:
+        points.append((x0, y0))
+        if x0 == x1 and y0 == y1:
+            break
+        e2 = 2 * err
+        if e2 > -dy:
+            err -= dy
+            x0 += sx
+        if e2 < dx:
+            err += dx
+            y0 += sy
+    return points
+
+
+def _thicken_point(cx: int, cy: int, width: int) -> list[tuple[int, int]]:
+    """Return pixels forming a filled shape of given width around (cx, cy).
+
+    width=1 → single point, width=2 → plus shape (5px),
+    width=3 → 3×3 block (9px), width=4 → diamond radius 2 (13px).
+    """
+    if width <= 1:
+        return [(cx, cy)]
+    if width == 2:
+        return [(cx, cy), (cx - 1, cy), (cx + 1, cy), (cx, cy - 1), (cx, cy + 1)]
+    if width == 3:
+        return [(cx + dx, cy + dy) for dx in range(-1, 2) for dy in range(-1, 2)]
+    # width >= 4: diamond with radius 2
+    r = width // 2
+    return [(cx + dx, cy + dy)
+            for dx in range(-r, r + 1)
+            for dy in range(-r, r + 1)
+            if abs(dx) + abs(dy) <= r]
+
+
 # ---------------------------------------------------------------------------
 # Microbe dataclass
 # ---------------------------------------------------------------------------
@@ -119,8 +164,8 @@ class _Microbe:
     dash_inc: float      # per-tick increment to dash_perc
     dash_perc: float     # animation progress [0, 1]
     ease_pow: int        # easing exponent
+    stroke_weight: int   # pixel width of the microbe body
     ease_out: bool = False   # True → easeOut (burst); False → animEase (normal)
-    trail: list[tuple[float, float]] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -146,12 +191,9 @@ class MicrobesEffect:
         self._swarming_start = 0
         self._fade_start_tick = 0
 
-        # Ghost erasure
-        self._prev_render_positions: set[tuple[int, int]] = set()
+        # Ghost erasure (cell-space positions)
+        self._prev_cell_positions: set[tuple[int, int]] = set()
 
-        # Cursor-shake cancel
-        self._shake = CursorShakeDetector()
-        self._cancel_requested = False
 
     # -- Initialization -------------------------------------------------------
 
@@ -173,6 +215,7 @@ class MicrobesEffect:
             rr, g, bl = _hsb_to_rgb(h, s, b)
             color: Color = (rr, g, bl, 1.0)
             ease_pow = self._rng.randint(MIN_EASE_POW, MAX_EASE_POW)
+            stroke_w = self._rng.randint(MIN_STROKE, MAX_STROKE)
             m = _Microbe(
                 fx=fx, fy=fy,
                 path_x=[], path_y=[], path_len=0,
@@ -180,6 +223,7 @@ class MicrobesEffect:
                 next_dash=0,
                 dash_inc=0.0, dash_perc=0.0,
                 ease_pow=ease_pow,
+                stroke_weight=stroke_w,
             )
             self._microbes.append(m)
 
@@ -277,26 +321,24 @@ class MicrobesEffect:
             self._prepare_dash(m, delay=0)
             return
 
-        m.dash_perc = min(1.0, m.dash_perc + m.dash_inc)
+        m.dash_perc += m.dash_inc
+        # Compute eased head position (clamped to [0,1] for calc_pos)
+        head_perc = min(1.0, m.dash_perc)
         if m.ease_out:
-            eased = self._ease_out(m.dash_perc, m.ease_pow)
+            eased = self._ease_out(head_perc, m.ease_pow)
         else:
-            eased = self._anim_ease(m.dash_perc, m.ease_pow)
+            eased = self._anim_ease(head_perc, m.ease_pow)
         x, y = self._calc_pos(m, eased)
 
         # Clamp to bounds
         x = max(0.0, min(float(self._width - 1), x))
         y = max(0.0, min(float(self._px_height - 1), y))
 
-        # Update trail
-        m.trail.append((m.fx, m.fy))
-        if len(m.trail) > TRAIL_LEN:
-            m.trail = m.trail[-TRAIL_LEN:]
-
         m.fx = x
         m.fy = y
 
-        if m.dash_perc >= 1.0:
+        # JS allows dashPerc up to 1 + DASH_TRAIL so the trail finishes
+        if m.dash_perc > 1.0 + DASH_TRAIL:
             self._prepare_dash(m)
 
     # -- Explode intro --------------------------------------------------------
@@ -342,7 +384,7 @@ class MicrobesEffect:
         self._microbes = []
         self._swarming_start = 0
         self._fade_start_tick = 0
-        self._prev_render_positions = set()
+        self._prev_cell_positions = set()
 
     def _pick_delay(self) -> int:
         return round(self._rng.uniform(0.75, 1.25) * self._idle_secs * 30)
@@ -351,8 +393,6 @@ class MicrobesEffect:
 
     def on_pty_update(self, update: PTYUpdate) -> None:
         w, h = update.size
-        if self._shake.update(update.cursor):
-            self._cancel_requested = True
         if self._phase == Phase.IDLE:
             self._width = w
             self._height = h
@@ -372,7 +412,7 @@ class MicrobesEffect:
         self._width = new_w
         self._height = new_h
         self._px_height = new_h * 2
-        self._prev_render_positions = set()
+        self._prev_cell_positions = set()
 
         # Clamp microbes to new bounds
         for m in self._microbes:
@@ -383,12 +423,6 @@ class MicrobesEffect:
                 m.path_x[i] = max(0.0, min(float(new_w - 1), m.path_x[i]))
             for i in range(len(m.path_y)):
                 m.path_y[i] = max(0.0, min(float(self._px_height - 1), m.path_y[i]))
-            # Clamp trail
-            m.trail = [
-                (max(0.0, min(float(new_w - 1), tx)),
-                 max(0.0, min(float(self._px_height - 1), ty)))
-                for tx, ty in m.trail
-            ]
 
     # -- Rendering ------------------------------------------------------------
 
@@ -399,48 +433,102 @@ class MicrobesEffect:
         return 1.0
 
     def _render(self) -> list[OutputMessage]:
-        pixels: list[Pixel] = []
-        current_positions: set[tuple[int, int]] = set()
+        # cell_colors maps (col, row) -> [top_color, bottom_color]
+        cell_colors: dict[tuple[int, int], list[Color | None]] = {}
+        current_positions: set[tuple[int, int]] = set()  # pixel-space dedup
         fade_alpha = self._get_fade_alpha()
+        max_x = self._width - 1
+        max_y = self._px_height - 1
+
+        def _add_pixel(px: int, py: int, color: Color) -> None:
+            pos = (max(0, min(max_x, px)), max(0, min(max_y, py)))
+            if pos in current_positions:
+                return
+            current_positions.add(pos)
+            col, row = pos[0], pos[1] // 2
+            key = (col, row)
+            if key not in cell_colors:
+                cell_colors[key] = [None, None]
+            if pos[1] % 2 == 0:
+                cell_colors[key][0] = color  # top half
+            else:
+                cell_colors[key][1] = color  # bottom half
 
         for m in self._microbes:
-            # Render trail with decreasing alpha
-            for i, (tx, ty) in enumerate(m.trail):
-                px = max(0, min(self._width - 1, round(tx)))
-                py = max(0, min(self._px_height - 1, round(ty)))
-                pos = (px, py)
-                if pos in current_positions:
-                    continue
-                trail_alpha = ((i + 1) / (len(m.trail) + 1)) * 0.5 * fade_alpha
-                if trail_alpha <= 0.0:
-                    continue
-                color: Color = (m.color[0], m.color[1], m.color[2], trail_alpha)
-                pixels.append(Pixel(coordinates=pos, color=color))
-                current_positions.add(pos)
-
-            # Render head
-            px = max(0, min(self._width - 1, round(m.fx)))
-            py = max(0, min(self._px_height - 1, round(m.fy)))
-            pos = (px, py)
-            if pos not in current_positions:
+            if m.next_dash > 0 or m.path_len < 2:
+                cx = max(0, min(max_x, round(m.fx)))
+                cy = max(0, min(max_y, round(m.fy)))
                 alpha = m.color[3] * fade_alpha
-                if alpha > 0.0:
-                    color = (m.color[0], m.color[1], m.color[2], alpha)
-                    pixels.append(Pixel(coordinates=pos, color=color))
-                    current_positions.add(pos)
+                if alpha <= 0.0:
+                    continue
+                color: Color = (m.color[0], m.color[1], m.color[2], alpha)
+                for px, py in _thicken_point(cx, cy, m.stroke_weight):
+                    _add_pixel(px, py, color)
+                continue
 
-        # Ghost erasure
-        ghost_pixels = [
-            Pixel(coordinates=pos, color=None)
-            for pos in self._prev_render_positions - current_positions
-            if 0 <= pos[0] < self._width and 0 <= pos[1] < self._px_height
+            sample_pts: list[tuple[int, int]] = []
+            for i in range(TRAIL_SAMPLES):
+                raw_perc = m.dash_perc - (DASH_TRAIL / TRAIL_SAMPLES) * i
+                clamped = max(0.0, min(1.0, raw_perc))
+                if m.ease_out:
+                    eased = self._ease_out(clamped, m.ease_pow)
+                else:
+                    eased = self._anim_ease(clamped, m.ease_pow)
+                sx, sy = self._calc_pos(m, eased)
+                sx = max(0.0, min(float(max_x), sx))
+                sy = max(0.0, min(float(max_y), sy))
+                sample_pts.append((round(sx), round(sy)))
+
+            sample_pts.reverse()
+            n_samples = len(sample_pts)
+
+            for idx in range(n_samples):
+                t = idx / max(1, n_samples - 1)
+                seg_alpha = (0.3 + 0.7 * t) * fade_alpha
+                if seg_alpha <= 0.0:
+                    continue
+
+                sw = max(1, round(1 + (m.stroke_weight - 1) * t))
+                color = (m.color[0], m.color[1], m.color[2], seg_alpha)
+
+                if idx < n_samples - 1:
+                    line_pts = _bresenham_line(
+                        sample_pts[idx][0], sample_pts[idx][1],
+                        sample_pts[idx + 1][0], sample_pts[idx + 1][1],
+                    )
+                else:
+                    line_pts = [sample_pts[idx]]
+
+                for lx, ly in line_pts:
+                    for px, py in _thicken_point(lx, ly, sw):
+                        _add_pixel(px, py, color)
+
+        # Convert cell_colors to Cell list
+        cells: list[Cell] = []
+        for (col, row), (top, bottom) in cell_colors.items():
+            if top is not None and bottom is not None:
+                cells.append(Cell(character="\u2580", coordinates=(col, row),
+                                  fg=top, bg=bottom))
+            elif top is not None:
+                cells.append(Cell(character="\u2580", coordinates=(col, row),
+                                  fg=top, bg=None))
+            else:
+                cells.append(Cell(character="\u2584", coordinates=(col, row),
+                                  fg=bottom, bg=None))
+
+        # Ghost erasure (cell-space)
+        current_cell_positions = set(cell_colors.keys())
+        ghost_cells = [
+            Cell(character=" ", coordinates=pos, fg=None, bg=None)
+            for pos in self._prev_cell_positions - current_cell_positions
+            if 0 <= pos[0] < self._width and 0 <= pos[1] < self._height
         ]
-        self._prev_render_positions = current_positions
+        self._prev_cell_positions = current_cell_positions
 
-        all_pixels = ghost_pixels + pixels
-        if not all_pixels:
+        all_cells = ghost_cells + cells
+        if not all_cells:
             return []
-        return [OutputPixels(pixels=all_pixels)]
+        return [OutputCells(cells=all_cells)]
 
     # -- Phase transitions ----------------------------------------------------
 
@@ -459,6 +547,16 @@ class MicrobesEffect:
     def phase(self) -> Phase:
         return self._phase
 
+    def cancel(self) -> None:
+        """Begin fading from any active phase."""
+        if self._phase == Phase.SWARMING:
+            self._phase = Phase.FADING
+            self._fade_start_tick = self._tick_count
+
+    @property
+    def is_done(self) -> bool:
+        return self._phase == Phase.DONE
+
     def tick(self) -> list[OutputMessage]:
         self._tick_count += 1
 
@@ -472,12 +570,6 @@ class MicrobesEffect:
             self._idle_until = self._tick_count + self._pick_delay()
             self._phase = Phase.IDLE
             return []
-
-        # Cursor-shake cancel: force SWARMING to FADING
-        if self._cancel_requested and self._phase == Phase.SWARMING:
-            self._phase = Phase.FADING
-            self._fade_start_tick = self._tick_count
-        self._cancel_requested = False
 
         # Update microbes
         for m in self._microbes:

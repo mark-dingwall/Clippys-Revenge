@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from enum import IntEnum
 
 from clippy.harness import run
-from clippy.types import Cell, Color, CursorShakeDetector, OutputCells, OutputMessage, PTYUpdate, TTYResize
+from clippy.types import Cell, Color, OutputCells, OutputMessage, PTYUpdate, TTYResize
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -428,16 +428,11 @@ class GroveEffect:
         # Ghost-cell erasure: track positions emitted last frame
         self._prev_render_positions: set[tuple[int, int]] = set()
 
-        # Cursor-shake cancel
-        self._shake = CursorShakeDetector()
-        self._cancel_requested = False
 
     # -- Protocol callbacks --------------------------------------------------
 
     def on_pty_update(self, update: PTYUpdate) -> None:
         w, h = update.size
-        if self._shake.update(update.cursor):
-            self._cancel_requested = True
         if self._phase == Phase.IDLE:
             self._width = w
             self._height = h
@@ -1415,6 +1410,16 @@ class GroveEffect:
     def phase(self) -> Phase:
         return self._phase
 
+    def cancel(self) -> None:
+        """Begin fading from any active phase."""
+        if self._phase in (Phase.GROWING, Phase.PERCHING):
+            self._phase = Phase.FADING
+            self._fade_start_tick = self._tick_count
+
+    @property
+    def is_done(self) -> bool:
+        return self._phase == Phase.DONE
+
     def tick(self) -> list[OutputMessage]:
         self._tick_count += 1
 
@@ -1428,12 +1433,6 @@ class GroveEffect:
             self._idle_until = self._tick_count + self._pick_delay()
             self._phase = Phase.IDLE
             return []
-
-        # Cursor-shake cancel: force active phases to FADING
-        if self._cancel_requested and self._phase in (Phase.GROWING, Phase.PERCHING):
-            self._phase = Phase.FADING
-            self._fade_start_tick = self._tick_count
-        self._cancel_requested = False
 
         # Dispatch simulation
         if self._phase == Phase.GROWING:

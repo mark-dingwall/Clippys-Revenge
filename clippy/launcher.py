@@ -8,7 +8,6 @@ from __future__ import annotations
 import argparse
 import importlib
 import os
-import random
 import shutil
 import stat
 import sys
@@ -41,8 +40,7 @@ def _escape_toml_string(s: str) -> str:
 
 
 def generate_config(
-    effect_path: str,
-    mascot_path: str | None = None,
+    effect_paths: list[str],
     shell_cmd: str | None = None,
     fps: int = 30,
     config_dir: str | None = None,
@@ -50,7 +48,7 @@ def generate_config(
     """Generate tattoy.toml (and palette.toml if absent) and return the config dir path.
 
     config_dir defaults to ~/.cache/clippys-revenge/ (overridable for tests).
-    When mascot_path is provided, a second [[plugins]] block is appended at layer 3.
+    Each path in effect_paths gets its own [[plugins]] block at layer 2.
     """
     if shell_cmd is None:
         shell_cmd = os.environ.get("SHELL", "/bin/bash")
@@ -60,7 +58,6 @@ def generate_config(
     out_dir = Path(config_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    plugin_name = Path(effect_path).stem
     toml_content = (
         f'command = "{_escape_toml_string(shell_cmd)}"\n'
         f"frame_rate = {fps}\n"
@@ -69,21 +66,16 @@ def generate_config(
         f"\n"
         f"[keybindings]\n"
         f'toggle_tattoy = {{ mods = "ALT", key = "t" }}\n'
-        f"\n"
-        f"[[plugins]]\n"
-        f'name = "{_escape_toml_string(plugin_name)}"\n'
-        f'path = "{_escape_toml_string(effect_path)}"\n'
-        f"layer = 2\n"
     )
 
-    if mascot_path is not None:
-        mascot_name = Path(mascot_path).stem
+    for effect_path in effect_paths:
+        plugin_name = Path(effect_path).stem
         toml_content += (
             f"\n"
             f"[[plugins]]\n"
-            f'name = "{_escape_toml_string(mascot_name)}"\n'
-            f'path = "{_escape_toml_string(mascot_path)}"\n'
-            f"layer = 3\n"
+            f'name = "{_escape_toml_string(plugin_name)}"\n'
+            f'path = "{_escape_toml_string(effect_path)}"\n'
+            f"layer = 2\n"
         )
 
     (out_dir / "tattoy.toml").write_text(toml_content)
@@ -162,7 +154,14 @@ def main(argv: list[str] | None = None) -> int:
         meta = effects[args.demo]
         module = importlib.import_module(f"clippy.effects.{Path(meta['module_path']).stem}")
         effect_class = getattr(module, meta["class_name"])
-        effect = effect_class(idle_secs=0)
+
+        if meta.get("overlay"):
+            # Standalone overlay demo (e.g. --demo mascot)
+            effect = effect_class(idle_secs=0)
+        else:
+            # Wrap in UnifiedEffect for demo mode
+            from clippy.unified import UnifiedEffect
+            effect = UnifiedEffect(effect_class, idle_secs=0)
 
         try:
             cols, rows = os.get_terminal_size()
@@ -192,7 +191,7 @@ def main(argv: list[str] | None = None) -> int:
         if not selectable:
             print("No effects found.", file=sys.stderr)
             return 1
-        selected = random.choice(list(selectable.keys()))
+        selected = None  # unified_runner will cycle through all effects
 
     # Require tattoy
     tattoy_path = find_tattoy()
@@ -203,16 +202,9 @@ def main(argv: list[str] | None = None) -> int:
         print("  Or:  cargo install tattoy", file=sys.stderr)
         return 1
 
-    meta = effects[selected]
-    effect_path = meta["module_path"]
-
-    # Ensure effect script is executable
-    ensure_executable(Path(effect_path))
-
-    # Inject mascot overlay if available
-    mascot_path = overlays["mascot"]["module_path"] if "mascot" in overlays else None
-    if mascot_path is not None:
-        ensure_executable(Path(mascot_path))
+    # Use unified runner as the plugin entry point
+    runner_path = str(Path(__file__).resolve().parent / "unified_runner.py")
+    ensure_executable(Path(runner_path))
 
     # Set PYTHONPATH so the effect subprocess can import clippy.*
     project_root = str(Path(__file__).resolve().parent.parent)
@@ -220,18 +212,26 @@ def main(argv: list[str] | None = None) -> int:
     if project_root not in existing.split(os.pathsep):
         os.environ["PYTHONPATH"] = project_root + (os.pathsep + existing if existing else "")
 
+    # Tell unified_runner which effect to use (if pinned)
+    if selected:
+        os.environ["CLIPPY_EFFECT"] = selected
+    else:
+        os.environ.pop("CLIPPY_EFFECT", None)
+
     # Build shell command
     shell_cmd = " ".join(args.command) if args.command else None
 
     # Generate config and launch
     config_path = generate_config(
-        effect_path=effect_path,
-        mascot_path=mascot_path,
+        effect_paths=[runner_path],
         shell_cmd=shell_cmd,
         fps=args.fps,
     )
 
-    print(f"Launching Clippy's Revenge with '{selected}' effect...")
+    if selected:
+        print(f"Launching Clippy's Revenge with '{selected}' effect...")
+    else:
+        print(f"Launching Clippy's Revenge cycling through: {', '.join(sorted(selectable))}...")
 
     os.execvp(tattoy_path, [tattoy_path, "--config-dir", config_path])
     return 0  # unreachable, but keeps the type checker happy

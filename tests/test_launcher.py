@@ -99,13 +99,13 @@ class TestEnsureExecutable:
 
 class TestGenerateConfig:
     def test_creates_dir(self, tmp_path):
-        config_dir = generate_config("/path/to/fire.py", config_dir=str(tmp_path / "cfg"))
+        config_dir = generate_config(["/path/to/fire.py"], config_dir=str(tmp_path / "cfg"))
         assert Path(config_dir).is_dir()
         assert (Path(config_dir) / "tattoy.toml").is_file()
 
     def test_toml_content(self, tmp_path):
         config_dir = generate_config(
-            "/path/to/fire.py",
+            ["/path/to/fire.py"],
             shell_cmd="/bin/zsh",
             fps=60,
             config_dir=str(tmp_path),
@@ -123,24 +123,24 @@ class TestGenerateConfig:
         assert 'toggle_tattoy' in content
 
     def test_seeds_palette(self, tmp_path):
-        config_dir = generate_config("/path/to/fire.py", config_dir=str(tmp_path))
+        config_dir = generate_config(["/path/to/fire.py"], config_dir=str(tmp_path))
         assert (Path(config_dir) / "palette.toml").is_file()
 
     def test_does_not_overwrite_existing_palette(self, tmp_path):
         existing = tmp_path / "palette.toml"
         existing.write_text("custom = [1, 2, 3]\n")
-        generate_config("/path/to/fire.py", config_dir=str(tmp_path))
+        generate_config(["/path/to/fire.py"], config_dir=str(tmp_path))
         assert existing.read_text() == "custom = [1, 2, 3]\n"
 
     def test_default_shell(self, tmp_path):
         with mock.patch.dict(os.environ, {"SHELL": "/bin/fish"}):
-            config_dir = generate_config("/path/to/fire.py", config_dir=str(tmp_path))
+            config_dir = generate_config(["/path/to/fire.py"], config_dir=str(tmp_path))
         content = (Path(config_dir) / "tattoy.toml").read_text()
         assert 'command = "/bin/fish"' in content
 
     def test_backslash_escaping(self, tmp_path):
         config_dir = generate_config(
-            r"C:\Users\test\fire.py",
+            [r"C:\Users\test\fire.py"],
             shell_cmd=r"C:\Windows\system32\cmd.exe",
             config_dir=str(tmp_path),
         )
@@ -150,13 +150,23 @@ class TestGenerateConfig:
 
     def test_quote_escaping(self, tmp_path):
         config_dir = generate_config(
-            '/path/to/"fire".py',
+            ['/path/to/"fire".py'],
             shell_cmd='/bin/sh -c "echo hi"',
             config_dir=str(tmp_path),
         )
         content = (Path(config_dir) / "tattoy.toml").read_text()
         assert r'command = "/bin/sh -c \"echo hi\""' in content
         assert r'path = "/path/to/\"fire\".py"' in content
+
+    def test_multiple_effects_each_get_plugin_block(self, tmp_path):
+        config_dir = generate_config(
+            ["/path/to/fire.py", "/path/to/grove.py"],
+            config_dir=str(tmp_path),
+        )
+        content = (Path(config_dir) / "tattoy.toml").read_text()
+        assert content.count("[[plugins]]") == 2
+        assert 'name = "fire"' in content
+        assert 'name = "grove"' in content
 
 
 # ---------------------------------------------------------------------------
@@ -242,15 +252,15 @@ class TestMain:
         with mock.patch("clippy.demo.demo_run"):
             assert main(["--demo", "mascot"]) == 0
 
-    def test_launch_includes_mascot(self):
+    def test_launch_uses_unified_runner(self):
         with mock.patch("clippy.launcher.find_tattoy", return_value="/usr/bin/tattoy"), \
              mock.patch("clippy.launcher.generate_config", return_value="/tmp/test.toml") as mock_gen, \
              mock.patch("clippy.launcher.ensure_executable"), \
              mock.patch("os.execvp"):
             main(["--effect", "fire"])
         _, kwargs = mock_gen.call_args
-        assert kwargs.get("mascot_path") is not None
-
+        assert len(kwargs["effect_paths"]) == 1
+        assert "unified_runner" in kwargs["effect_paths"][0]
 
     def test_fps_flag_forwarded_to_generate_config(self):
         """--fps 60 is forwarded to generate_config as fps=60."""
@@ -263,24 +273,35 @@ class TestMain:
         _, kwargs = mock_gen.call_args
         assert kwargs["fps"] == 60
 
+    def test_no_effect_flag_does_not_set_env(self):
+        """When no --effect flag, CLIPPY_EFFECT is NOT set in env."""
+        with mock.patch("clippy.launcher.find_tattoy", return_value="/usr/bin/tattoy"), \
+             mock.patch("clippy.launcher.generate_config", return_value="/tmp/test.toml"), \
+             mock.patch("clippy.launcher.ensure_executable"), \
+             mock.patch("os.execvp"):
+            # Pre-set to verify it gets removed
+            os.environ["CLIPPY_EFFECT"] = "stale"
+            main([])
 
-class TestGenerateConfigMascot:
-    def test_toml_with_mascot(self, tmp_path):
-        config_dir = generate_config(
-            effect_path="/path/to/fire.py",
-            mascot_path="/path/to/mascot.py",
-            config_dir=str(tmp_path),
-        )
-        content = (Path(config_dir) / "tattoy.toml").read_text()
-        assert content.count("[[plugins]]") == 2
-        assert 'name = "mascot"' in content
-        assert "layer = 3" in content
-        assert 'path = "/path/to/mascot.py"' in content
+        assert "CLIPPY_EFFECT" not in os.environ
 
-    def test_toml_without_mascot_has_one_plugin(self, tmp_path):
+    def test_effect_flag_sets_env(self):
+        """--effect fire sets CLIPPY_EFFECT=fire in env."""
+        with mock.patch("clippy.launcher.find_tattoy", return_value="/usr/bin/tattoy"), \
+             mock.patch("clippy.launcher.generate_config", return_value="/tmp/test.toml"), \
+             mock.patch("clippy.launcher.ensure_executable"), \
+             mock.patch("os.execvp"):
+            main(["--effect", "fire"])
+
+        assert os.environ.get("CLIPPY_EFFECT") == "fire"
+
+
+class TestGenerateConfigSinglePlugin:
+    def test_single_plugin_block(self, tmp_path):
         config_dir = generate_config(
-            effect_path="/path/to/fire.py",
+            effect_paths=["/path/to/fire.py"],
             config_dir=str(tmp_path),
         )
         content = (Path(config_dir) / "tattoy.toml").read_text()
         assert content.count("[[plugins]]") == 1
+        assert "layer = 2" in content

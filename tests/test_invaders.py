@@ -556,18 +556,32 @@ def test_active_duration_cap():
     )
 
 
-def test_cursor_shake_cancels_invaders():
-    """Cursor shake during ACTIVE transitions immediately to FADING."""
+def test_cancel_triggers_fading():
+    """cancel() during ACTIVE transitions immediately to FADING."""
     effect = InvadersEffect(seed=0, idle_secs=0)
     effect.on_pty_update(make_pty_update(80, 24))
     assert run_to_phase(effect, Phase.ACTIVE, max_ticks=500), "Never reached ACTIVE"
 
-    # Simulate 3 left-right reversals (5 cursor positions needed)
-    shake_xs = [10, 30, 10, 30, 10]
-    for x in shake_xs:
-        effect.on_pty_update(PTYUpdate(size=(80, 24), cells=[], cursor=(x, 0)))
-
-    effect.tick()
+    effect.cancel()
     assert effect.phase == Phase.FADING, (
-        f"Expected FADING after cursor shake, got {effect.phase.name}"
+        f"Expected FADING after cancel(), got {effect.phase.name}"
     )
+
+
+def test_cancel_during_bombardment():
+    """cancel() during BOMBARDMENT transitions to FADING."""
+    effect = InvadersEffect(seed=0, idle_secs=0)
+    effect.on_pty_update(make_pty_update(80, 24))
+    effect.tick()  # starts bombardment
+    assert effect.phase == Phase.BOMBARDMENT
+    effect.cancel()
+    assert effect.phase == Phase.FADING
+
+
+def test_is_done_property():
+    """is_done is True iff phase is DONE."""
+    effect = InvadersEffect(seed=42, idle_secs=0)
+    assert not effect.is_done
+    effect.on_pty_update(make_pty_update(20, 8))
+    run_to_phase(effect, Phase.DONE, max_ticks=3000)
+    assert effect.is_done

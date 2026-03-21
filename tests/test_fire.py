@@ -457,6 +457,7 @@ def test_ember_extinguishes_to_charred():
     effect._is_ember[y][x] = True
     effect._ember_ignition_tick[y][x] = effect._tick_count - EMBER_LIFETIME  # already aged out
     effect._ember_count += 1
+    effect._ember_positions.add((x, y))
 
     effect.tick()
 
@@ -479,6 +480,7 @@ def test_smoke_emits_above_ember():
     effect._is_ember[y][x] = True
     effect._ember_ignition_tick[y][x] = effect._tick_count
     effect._ember_count += 1
+    effect._ember_positions.add((x, y))
 
     for _ in range(50):
         effect.tick()
@@ -529,6 +531,7 @@ def test_wasteland_blocked_by_live_ember():
     effect._is_ember[y][x] = True
     effect._ember_ignition_tick[y][x] = effect._tick_count  # freshly ignited
     effect._ember_count = 1
+    effect._ember_positions.add((x, y))
 
     effect.tick()
 
@@ -560,19 +563,14 @@ def test_ember_count_invariant(seed):
 # Cursor-shake CANCEL_FADING
 # ---------------------------------------------------------------------------
 
-def test_cursor_shake_triggers_cancel_fading():
-    """Cursor shake during SPREADING transitions immediately to CANCEL_FADING."""
+def test_cancel_triggers_cancel_fading():
+    """cancel() during SPREADING transitions immediately to CANCEL_FADING."""
     effect = FireEffect(seed=0, idle_secs=0)
     effect.on_pty_update(make_pty_update(80, 24))
     effect.tick()  # idle_secs=0: starts effect
     assert effect.phase == Phase.SPREADING
 
-    # 5 cursor positions produce 3 x-axis reversals → shake detected
-    shake_xs = [10, 30, 10, 30, 10]
-    for x in shake_xs:
-        effect.on_pty_update(make_pty_update(80, 24, cursor=(x, 0)))
-
-    effect.tick()
+    effect.cancel()
     assert effect.phase == Phase.CANCEL_FADING
 
 
@@ -582,10 +580,7 @@ def test_cancel_fading_fades_and_reaches_done():
     effect.on_pty_update(make_pty_update(80, 24))
     effect.tick()
 
-    shake_xs = [10, 30, 10, 30, 10]
-    for x in shake_xs:
-        effect.on_pty_update(make_pty_update(80, 24, cursor=(x, 0)))
-    effect.tick()
+    effect.cancel()
     assert effect.phase == Phase.CANCEL_FADING
 
     # Run for CANCEL_FADE_DURATION + a few extra ticks; phase should reach DONE
@@ -650,10 +645,7 @@ def test_cancel_fading_alpha_decreases():
     effect.tick()  # start effect
     assert effect.phase == Phase.SPREADING
 
-    shake_xs = [10, 30, 10, 30, 10]
-    for x in shake_xs:
-        effect.on_pty_update(make_pty_update(80, 24, cursor=(x, 0)))
-    effect.tick()
+    effect.cancel()
     assert effect.phase == Phase.CANCEL_FADING
 
     found_dimmed = False
@@ -682,3 +674,173 @@ def test_nonzero_idle_secs_delays_start():
     assert effect.phase == Phase.IDLE, (
         f"Expected IDLE after 100 ticks with idle_secs=5, got {effect.phase.name}"
     )
+
+
+def test_cancel_noop_in_idle():
+    """cancel() during IDLE has no effect — phase stays IDLE."""
+    effect = FireEffect(seed=0, idle_secs=0)
+    effect.on_pty_update(make_pty_update(80, 24))
+    effect._idle_until = effect._tick_count + 10000  # far in the future
+    assert effect.phase == Phase.IDLE
+    effect.cancel()
+    assert effect.phase == Phase.IDLE
+
+
+def test_is_done_property():
+    """is_done is True iff phase is DONE."""
+    effect = FireEffect(seed=42, idle_secs=0)
+    assert not effect.is_done
+    effect.on_pty_update(make_pty_update(10, 4))
+    run_to_phase(effect, Phase.DONE, max_ticks=1500)
+    assert effect.is_done
+
+
+# ---------------------------------------------------------------------------
+# Delta rendering
+# ---------------------------------------------------------------------------
+
+def test_delta_reduces_output():
+    """During WASTELAND, consecutive frames with no decay emit fewer cells."""
+    effect = FireEffect(seed=42, idle_secs=0)
+    effect.on_pty_update(make_pty_update(20, 8))
+    assert run_to_phase(effect, Phase.WASTELAND, max_ticks=600), "Never reached WASTELAND"
+
+    # First WASTELAND frame: everything is "new" relative to prev_content
+    outputs_first = effect.tick()
+    count_first = sum(len(out.cells) for out in outputs_first)
+
+    # Second frame: charred cells that didn't decay should be skipped
+    outputs_second = effect.tick()
+    count_second = sum(len(out.cells) for out in outputs_second)
+
+    assert count_second < count_first, (
+        f"Second frame ({count_second} cells) should emit fewer cells than first ({count_first})"
+    )
+
+
+def test_ghost_erasure_on_smoke_move():
+    """When smoke moves, the vacated position is handled by ghost erasure or charred re-emission."""
+    effect = FireEffect(seed=0, idle_secs=0)
+    effect.on_pty_update(make_pty_update(20, 8))
+    assert run_to_phase(effect, Phase.WASTELAND, max_ticks=600), "Never reached WASTELAND"
+
+    # Inject a smoke particle at a known position
+    from clippy.effects.fire import SmokeParticle
+    effect._smoke = [SmokeParticle(
+        fx=10.0, fy=4.0, vx=0.0, vy=0.0, tier=4,
+        last_decay_tick=effect._tick_count,
+    )]
+
+    # First tick: smoke renders at (10, 4)
+    effect.tick()
+    assert (10, 4) in effect._prev_render_positions
+
+    # Move smoke far away so it vacates (10, 4)
+    effect._smoke = [SmokeParticle(
+        fx=5.0, fy=2.0, vx=0.0, vy=0.0, tier=4,
+        last_decay_tick=effect._tick_count,
+    )]
+    outputs = effect.tick()
+
+    # The old position (10, 4) should appear as either a ghost-erase or charred cell
+    emitted_positions = set()
+    for out in outputs:
+        for cell in out.cells:
+            emitted_positions.add(cell.coordinates)
+    assert (10, 4) in emitted_positions, (
+        "Vacated smoke position (10,4) not in emitted cells"
+    )
+
+
+def test_smoke_over_charred_restores():
+    """When smoke moves off a charred cell, charred content reappears."""
+    effect = FireEffect(seed=0, idle_secs=0)
+    effect.on_pty_update(make_pty_update(20, 8))
+    assert run_to_phase(effect, Phase.WASTELAND, max_ticks=600), "Never reached WASTELAND"
+
+    # Find a charred cell that won't decay soon
+    charred_pos = None
+    for x, y in effect._charred_positions:
+        if effect._charred_char[y][x] != " ":
+            charred_pos = (x, y)
+            break
+    if charred_pos is None:
+        pytest.skip("No non-blank charred cells available")
+
+    cx, cy = charred_pos
+    charred_char = effect._charred_char[cy][cx]
+
+    # Place smoke on top of the charred cell
+    from clippy.effects.fire import SmokeParticle
+    effect._smoke = [SmokeParticle(
+        fx=float(cx), fy=float(cy), vx=0.0, vy=0.0, tier=4,
+        last_decay_tick=effect._tick_count,
+    )]
+    effect.tick()  # renders smoke at charred position
+
+    # Move smoke away
+    effect._smoke = [SmokeParticle(
+        fx=float(cx + 5), fy=float(cy), vx=0.0, vy=0.0, tier=4,
+        last_decay_tick=effect._tick_count,
+    )]
+    outputs = effect.tick()
+
+    # Charred cell should be re-emitted at the old smoke position
+    found_charred = False
+    for out in outputs:
+        for cell in out.cells:
+            if cell.coordinates == charred_pos and cell.character == charred_char:
+                found_charred = True
+    assert found_charred, (
+        f"Charred cell '{charred_char}' at {charred_pos} not re-emitted after smoke moved away"
+    )
+
+
+def test_delta_resize_clears_tracking():
+    """No OOB ghost erasure after resize to smaller terminal."""
+    effect = FireEffect(seed=42, idle_secs=0)
+    effect.on_pty_update(make_pty_update(40, 12))
+    advance(effect, 20)  # build up render tracking state
+
+    # Shrink terminal
+    effect.on_resize(TTYResize(width=15, height=5))
+
+    # Ticking after resize must not emit OOB coordinates
+    for _ in range(10):
+        outputs = effect.tick()
+        for out in outputs:
+            for cell in out.cells:
+                x, y = cell.coordinates
+                assert 0 <= x < 15, f"x={x} OOB after resize"
+                assert 0 <= y < 5, f"y={y} OOB after resize"
+
+
+# ---------------------------------------------------------------------------
+# Heap-based decay
+# ---------------------------------------------------------------------------
+
+def test_heap_decay_reaches_done():
+    """Effect still reaches DONE within bounded ticks using heap-based decay."""
+    effect = FireEffect(seed=42, idle_secs=0)
+    effect.on_pty_update(make_pty_update(20, 8))
+    reached_done = run_to_phase(effect, Phase.DONE, max_ticks=1500)
+    assert reached_done, f"Effect did not reach DONE in 1500 ticks, stuck at {effect.phase.name}"
+
+
+# ---------------------------------------------------------------------------
+# Coarser heat resolution
+# ---------------------------------------------------------------------------
+
+def test_coarse_heat_in_bounds():
+    """Heat shimmer coordinates stay within terminal bounds with half-resolution propagation."""
+    effect = FireEffect(seed=42, idle_secs=0)
+    effect.on_pty_update(make_pty_update(80, 24))
+    for _ in range(200):
+        if effect.phase == Phase.DONE:
+            break
+        outputs = effect.tick()
+        for out in outputs:
+            for cell in out.cells:
+                x, y = cell.coordinates
+                assert 0 <= x < 80, f"x={x} out of bounds"
+                assert 0 <= y < 24, f"y={y} out of bounds"

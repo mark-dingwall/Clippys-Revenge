@@ -8,11 +8,13 @@ from clippy.effects.microbes import (
     SWARMING_DURATION,
     MicrobesEffect,
     Phase,
+    _bresenham_line,
     _catmull_rom,
     _hsb_to_rgb,
+    _thicken_point,
 )
 from clippy.harness import step
-from clippy.types import OutputPixels, Pixel, PTYUpdate, TTYResize
+from clippy.types import Cell, OutputCells, PTYUpdate, TTYResize
 
 
 # ---------------------------------------------------------------------------
@@ -57,7 +59,7 @@ SEEDS = [0, 1, 42, 99, 12345]
 
 @pytest.mark.parametrize("seed", SEEDS)
 def test_coordinates_in_bounds(seed):
-    """All pixel coordinates must be within [0, width) x [0, height*2)."""
+    """All cell coordinates must be within [0, width) x [0, height)."""
     effect = MicrobesEffect(seed=seed, idle_secs=0)
     effect.on_pty_update(make_pty_update(80, 24))
     for _ in range(100):
@@ -65,11 +67,11 @@ def test_coordinates_in_bounds(seed):
             break
         outputs = effect.tick()
         for out in outputs:
-            assert isinstance(out, OutputPixels)
-            for pixel in out.pixels:
-                x, y = pixel.coordinates
+            assert isinstance(out, OutputCells)
+            for cell in out.cells:
+                x, y = cell.coordinates
                 assert 0 <= x < 80, f"x={x} out of bounds"
-                assert 0 <= y < 48, f"y={y} out of bounds (height*2=48)"
+                assert 0 <= y < 24, f"y={y} out of bounds (height=24)"
 
 
 @pytest.mark.parametrize("seed", SEEDS)
@@ -80,25 +82,26 @@ def test_colors_in_range(seed):
     for _ in range(100):
         outputs = effect.tick()
         for out in outputs:
-            assert isinstance(out, OutputPixels)
-            for pixel in out.pixels:
-                if pixel.color is not None:
-                    for i, component in enumerate(pixel.color):
-                        assert 0.0 <= component <= 1.0, (
-                            f"Color component {i}={component} out of range "
-                            f"at ({pixel.coordinates})"
-                        )
+            assert isinstance(out, OutputCells)
+            for cell in out.cells:
+                for color in (cell.fg, cell.bg):
+                    if color is not None:
+                        for i, component in enumerate(color):
+                            assert 0.0 <= component <= 1.0, (
+                                f"Color component {i}={component} out of range "
+                                f"at ({cell.coordinates})"
+                            )
 
 
 @pytest.mark.parametrize("seed", SEEDS)
 def test_output_type(seed):
-    """tick() returns list containing only OutputPixels."""
+    """tick() returns list containing only OutputCells."""
     effect = MicrobesEffect(seed=seed, idle_secs=0)
     effect.on_pty_update(make_pty_update(40, 12))
     for _ in range(50):
         outputs = effect.tick()
         for out in outputs:
-            assert isinstance(out, OutputPixels)
+            assert isinstance(out, OutputCells)
 
 
 @pytest.mark.parametrize("seed", SEEDS)
@@ -189,10 +192,10 @@ def test_resize_no_oob():
     for _ in range(20):
         outputs = effect.tick()
         for out in outputs:
-            for pixel in out.pixels:
-                x, y = pixel.coordinates
+            for cell in out.cells:
+                x, y = cell.coordinates
                 assert 0 <= x < 20, f"x={x} OOB after resize"
-                assert 0 <= y < 12, f"y={y} OOB after resize (height*2=12)"
+                assert 0 <= y < 6, f"y={y} OOB after resize (height=6)"
 
 
 # ---------------------------------------------------------------------------
@@ -209,8 +212,8 @@ def test_seeded_deterministic():
             outputs = effect.tick()
             frame_data = []
             for out in outputs:
-                for pixel in out.pixels:
-                    frame_data.append((pixel.coordinates, pixel.color))
+                for cell in out.cells:
+                    frame_data.append((cell.coordinates, cell.character, cell.fg, cell.bg))
             frames.append(frame_data)
         return frames
 
@@ -233,10 +236,10 @@ def test_step_integration():
     result = step(effect, [])
     assert len(result) >= 1
     data = json.loads(result[0])
-    assert "output_pixels" in data
-    pixels = data["output_pixels"]
-    assert isinstance(pixels, list)
-    assert len(pixels) > 0
+    assert "output_cells" in data
+    cells = data["output_cells"]
+    assert isinstance(cells, list)
+    assert len(cells) > 0
 
     for _ in range(5):
         result = step(effect, [])
@@ -290,22 +293,83 @@ def test_catmull_rom():
     assert abs(_catmull_rom(0, 10, 20, 30, 0.5) - 15.0) < 1e-9
 
 
+def test_bresenham_line_basic():
+    """Bresenham line: horizontal, vertical, diagonal, single point."""
+    # Single point
+    assert _bresenham_line(5, 5, 5, 5) == [(5, 5)]
+
+    # Horizontal
+    pts = _bresenham_line(0, 0, 3, 0)
+    assert pts == [(0, 0), (1, 0), (2, 0), (3, 0)]
+
+    # Vertical
+    pts = _bresenham_line(0, 0, 0, 3)
+    assert pts == [(0, 0), (0, 1), (0, 2), (0, 3)]
+
+    # Diagonal
+    pts = _bresenham_line(0, 0, 3, 3)
+    assert len(pts) == 4
+    assert pts[0] == (0, 0)
+    assert pts[-1] == (3, 3)
+
+    # Reverse direction
+    pts = _bresenham_line(3, 0, 0, 0)
+    assert pts == [(3, 0), (2, 0), (1, 0), (0, 0)]
+
+
+def test_thicken_point():
+    """Thicken point: verify output sizes and contents for different widths."""
+    # Width 1: single point
+    pts = _thicken_point(5, 5, 1)
+    assert pts == [(5, 5)]
+
+    # Width 2: plus shape (5 pixels)
+    pts = _thicken_point(5, 5, 2)
+    assert len(pts) == 5
+    assert (5, 5) in pts
+    assert (4, 5) in pts
+    assert (6, 5) in pts
+    assert (5, 4) in pts
+    assert (5, 6) in pts
+
+    # Width 3: 3x3 block (9 pixels)
+    pts = _thicken_point(5, 5, 3)
+    assert len(pts) == 9
+    for dx in range(-1, 2):
+        for dy in range(-1, 2):
+            assert (5 + dx, 5 + dy) in pts
+
+    # Width 4: diamond radius 2 (13 pixels)
+    pts = _thicken_point(5, 5, 4)
+    assert len(pts) == 13
+    assert (5, 5) in pts
+    # Corners of radius 2 should NOT be included (|dx|+|dy| > 2)
+    assert (3, 3) not in pts
+    assert (7, 7) not in pts
+
+
 # ---------------------------------------------------------------------------
 # Cursor-shake cancellation
 # ---------------------------------------------------------------------------
 
-def _shake_msgs():
-    return [make_pty_json(cursor=(x, 5)) for x in [10, 30, 10, 30, 10]]
-
-
-def test_cursor_shake_cancels_microbes():
-    """Cursor shake during SWARMING transitions to FADING."""
+def test_cancel_during_swarming():
+    """cancel() during SWARMING transitions to FADING."""
     effect = MicrobesEffect(seed=42, idle_secs=0)
     effect.on_pty_update(make_pty_update(80, 24))
     effect.tick()  # start effect
     assert effect.phase == Phase.SWARMING
-    step(effect, _shake_msgs())
+    effect.cancel()
     assert effect.phase == Phase.FADING
+
+
+def test_is_done_property():
+    """is_done is True iff phase is DONE."""
+    effect = MicrobesEffect(seed=42, idle_secs=0)
+    assert not effect.is_done
+    effect.on_pty_update(make_pty_update(40, 12))
+    max_ticks = SWARMING_DURATION + FADE_DURATION + 50
+    run_to_phase(effect, Phase.DONE, max_ticks=max_ticks)
+    assert effect.is_done
 
 
 # ---------------------------------------------------------------------------
@@ -313,7 +377,7 @@ def test_cursor_shake_cancels_microbes():
 # ---------------------------------------------------------------------------
 
 def test_fading_alpha_decreases():
-    """At least one pixel has color alpha < 1.0 during FADING."""
+    """At least one cell has color alpha < 1.0 during FADING."""
     effect = MicrobesEffect(seed=42, idle_secs=0)
     effect.on_pty_update(make_pty_update(80, 24))
     assert run_to_phase(effect, Phase.FADING, max_ticks=SWARMING_DURATION + 50)
@@ -321,16 +385,17 @@ def test_fading_alpha_decreases():
     for _ in range(30):
         outputs = effect.tick()
         for out in outputs:
-            for pixel in out.pixels:
-                if pixel.color is not None and pixel.color[3] < 1.0:
-                    found_dimmed = True
+            for cell in out.cells:
+                for color in (cell.fg, cell.bg):
+                    if color is not None and color[3] < 1.0:
+                        found_dimmed = True
         if found_dimmed or effect.phase == Phase.DONE:
             break
-    assert found_dimmed, "No dimmed pixels observed during FADING"
+    assert found_dimmed, "No dimmed cells observed during FADING"
 
 
-def test_ghost_pixels_emitted():
-    """At least one Pixel(color=None) appears after SWARMING starts."""
+def test_ghost_cells_emitted():
+    """At least one ghost Cell(character=" ") appears after SWARMING starts."""
     effect = MicrobesEffect(seed=42, idle_secs=0)
     effect.on_pty_update(make_pty_update(80, 24))
     effect.tick()  # start effect
@@ -339,9 +404,9 @@ def test_ghost_pixels_emitted():
     for _ in range(SWARMING_DURATION + FADE_DURATION):
         outputs = effect.tick()
         for out in outputs:
-            for pixel in out.pixels:
-                if pixel.color is None:
+            for cell in out.cells:
+                if cell.character == " " and cell.fg is None and cell.bg is None:
                     found_ghost = True
         if found_ghost or effect.phase == Phase.DONE:
             break
-    assert found_ghost, "No ghost pixel (color=None) observed"
+    assert found_ghost, "No ghost cell (character=' ') observed"

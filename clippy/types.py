@@ -89,10 +89,10 @@ OutputMessage = OutputText | OutputCells | OutputPixels
 
 
 class CursorShakeDetector:
-    """Detects rapid left-right cursor shake: 3 x-axis reversals within 2 seconds."""
+    """Detects rapid left-right cursor shake: 5 x-axis reversals within 2 seconds."""
 
     WINDOW_TICKS = 60   # 2s at 30fps
-    REVERSALS_NEEDED = 3
+    REVERSALS_NEEDED = 5
 
     def __init__(self) -> None:
         self._last_x: int | None = None
@@ -121,8 +121,16 @@ class CursorShakeDetector:
 
         if len(self._reversal_ticks) >= self.REVERSALS_NEEDED:
             self._reversal_ticks.clear()
+            self._last_x = None
+            self._last_x_dir = 0
             return True
         return False
+
+    def reset(self) -> None:
+        """Clear all accumulated state. Call at phase boundaries."""
+        self._last_x = None
+        self._last_x_dir = 0
+        self._reversal_ticks.clear()
 
 
 def _validated_tuple(seq, length: int) -> tuple:

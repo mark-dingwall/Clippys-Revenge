@@ -130,8 +130,9 @@ class MascotEffect:
 
     def on_pty_update(self, update: PTYUpdate) -> None:
         self._width, self._height = update.size
-        if self._shake.update(update.cursor):
-            self._skip_requested = True
+        if self._phase in (Phase.WATCHING, Phase.IMMINENT_EARLY):
+            if self._shake.update(update.cursor):
+                self._skip_requested = True
         if not self._received_first_update:
             self._received_first_update = True
             self._compute_timing()

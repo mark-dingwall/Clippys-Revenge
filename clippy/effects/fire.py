@@ -8,6 +8,7 @@ updated every tick by the flow field plus a small base rise.
 from __future__ import annotations
 
 import collections
+import heapq
 import math
 import os
 import random
@@ -16,7 +17,7 @@ from enum import IntEnum
 
 from clippy.harness import run
 from clippy.noise import noise3
-from clippy.types import Cell, Color, CursorShakeDetector, OutputCells, OutputMessage, PTYUpdate, TTYResize
+from clippy.types import Cell, Color, OutputCells, OutputMessage, PTYUpdate, TTYResize
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -213,18 +214,24 @@ class FireEffect:
 
         # Frontier: BURNING cells with at least one CLEAR neighbor
         self._frontier: set[tuple[int, int]] = set()
+        self._burning_positions: set[tuple[int, int]] = set()
 
         # Counters for O(1) phase checks
         self._clear_count = 0
         self._burning_count = 0
         self._charred_count = 0
+        self._charred_positions: set[tuple[int, int]] = set()
 
         # Ember and smoke state
         self._is_ember: list[list[bool]] = []
         self._ember_ignition_tick: list[list[int]] = []
         self._ember_count: int = 0
+        self._ember_positions: set[tuple[int, int]] = set()
         self._smoke: list[SmokeParticle] = []
-        self._smoke_erase: list[tuple[int, int]] = []
+        self._hot_list: list[tuple[int, int]] = []
+        self._is_hot: list[list[bool]] = []
+        self._shimmer_cells: list[tuple[int, int]] = []
+        self._heat_rng = random.Random(0)
 
         # Flow field state (sector grid, recomputed every FLOW_UPDATE_TICKS)
         self._flow_dir: list[list[float]] = []    # direction degrees per sector
@@ -233,9 +240,12 @@ class FireEffect:
         self._flow_rows: int = 0
         self._last_flow_update: int = -FLOW_UPDATE_TICKS  # force update on first tick
 
-        # Cursor-shake cancel
-        self._shake = CursorShakeDetector()
-        self._cancel_requested = False
+        self._decay_heap: list[tuple[int, int, int]] = []
+
+        # Delta rendering state
+        self._prev_render_positions: set[tuple[int, int]] = set()
+        self._prev_render_content: dict[tuple[int, int], tuple[str, tuple | None, tuple | None]] = {}
+
         self._cancel_fade_start = 0
 
 
@@ -252,6 +262,9 @@ class FireEffect:
         self._last_decay_tick = [[0] * width for _ in range(height)]
         self._heat = [[0.0] * width for _ in range(height)]
         self._frontier.clear()
+        self._burning_positions.clear()
+        self._charred_positions.clear()
+        self._ember_positions.clear()
         self._clear_count = width * height
         self._burning_count = 0
         self._charred_count = 0
@@ -259,6 +272,12 @@ class FireEffect:
         self._ember_ignition_tick = [[-1] * width for _ in range(height)]
         self._ember_count = 0
         self._smoke = []
+        self._hot_list = []
+        self._is_hot = [[False] * width for _ in range(height)]
+        self._shimmer_cells = []
+        self._decay_heap = []
+        self._prev_render_positions = set()
+        self._prev_render_content = {}
         self._init_flow_field()
 
     def _ignite_initial(self) -> None:
@@ -278,6 +297,7 @@ class FireEffect:
         self._ignition_tick[y][x] = self._tick_count
         self._clear_count -= 1
         self._burning_count += 1
+        self._burning_positions.add((x, y))
         # Add to frontier if it has any CLEAR neighbor
         if self._has_clear_neighbor(x, y):
             self._frontier.add((x, y))
@@ -336,8 +356,6 @@ class FireEffect:
 
     def on_pty_update(self, update: PTYUpdate) -> None:
         w, h = update.size
-        if self._shake.update(update.cursor):
-            self._cancel_requested = True
         if self._phase == Phase.IDLE:
             self._width = w
             self._height = h
@@ -363,6 +381,9 @@ class FireEffect:
         self._last_decay_tick = []
         self._heat = []
         self._frontier = set()
+        self._burning_positions = set()
+        self._charred_positions = set()
+        self._ember_positions = set()
         self._clear_count = 0
         self._burning_count = 0
         self._charred_count = 0
@@ -370,7 +391,12 @@ class FireEffect:
         self._ember_ignition_tick = []
         self._ember_count = 0
         self._smoke = []
-        self._smoke_erase = []
+        self._hot_list = []
+        self._is_hot = []
+        self._shimmer_cells = []
+        self._decay_heap = []
+        self._prev_render_positions = set()
+        self._prev_render_content = {}
         self._flow_dir = []
         self._flow_str = []
 
@@ -406,6 +432,7 @@ class FireEffect:
                 if state == BURNING:
                     self._burning_count += 1
                     self._clear_count -= 1
+                    self._burning_positions.add((x, y))
                     if self._has_clear_neighbor(x, y):
                         self._frontier.add((x, y))
                 elif state == CHARRED:
@@ -414,13 +441,18 @@ class FireEffect:
                     self._charred_tier[y][x] = old_charred_tier[y][x]
                     self._decay_interval[y][x] = old_decay_interval[y][x]
                     self._last_decay_tick[y][x] = old_last_decay_tick[y][x]
-                    if old_charred_tier[y][x] < len(CHARRED_TIERS):
-                        self._charred_count += 1
                     if old_is_ember[y][x]:
                         self._is_ember[y][x] = True
                         self._ember_ignition_tick[y][x] = old_ember_ignition_tick[y][x]
                         self._ember_count += 1
-                        self._charred_count -= 1  # ember lifecycle is separate
+                        self._ember_positions.add((x, y))
+                    elif old_charred_tier[y][x] < len(CHARRED_TIERS):
+                        self._charred_count += 1
+                        self._charred_positions.add((x, y))
+                        remaining = max(1, old_decay_interval[y][x] - (self._tick_count - old_last_decay_tick[y][x]))
+                        heapq.heappush(self._decay_heap, (
+                            self._tick_count + remaining, x, y
+                        ))
 
         self._smoke = [
             p for p in old_smoke
@@ -439,7 +471,7 @@ class FireEffect:
         to_ignite: list[tuple[int, int]] = []
         to_remove: list[tuple[int, int]] = []
 
-        for fx, fy in sorted(self._frontier):
+        for fx, fy in self._frontier:
             has_clear = False
             for dx, dy, prob in _SPREAD_DIRS:
                 nx, ny = fx + dx, fy + dy
@@ -460,30 +492,32 @@ class FireEffect:
     def _age_cells(self) -> None:
         """Transition BURNING cells to CHARRED after BURN_DURATION."""
         to_char: list[tuple[int, int]] = []
-        for fx, fy in sorted(self._frontier):
+        for fx, fy in self._frontier:
             age = self._tick_count - self._ignition_tick[fy][fx]
             if age >= BURN_DURATION:
                 to_char.append((fx, fy))
 
         # Also scan burning cells not in frontier
         # (they lost all clear neighbors and were removed from frontier)
-        for y in range(self._height):
-            for x in range(self._width):
-                if self._cell_state[y][x] == BURNING:
-                    age = self._tick_count - self._ignition_tick[y][x]
-                    if age >= BURN_DURATION:
-                        to_char.append((x, y))
+        for x, y in self._burning_positions:
+            if (x, y) in self._frontier:
+                continue
+            age = self._tick_count - self._ignition_tick[y][x]
+            if age >= BURN_DURATION:
+                to_char.append((x, y))
 
         for x, y in to_char:
             if self._cell_state[y][x] == BURNING:
                 self._cell_state[y][x] = CHARRED
                 self._burning_count -= 1
                 self._frontier.discard((x, y))
+                self._burning_positions.discard((x, y))
 
                 if self._rng.random() < EMBER_PROB:
                     self._is_ember[y][x] = True
                     self._ember_ignition_tick[y][x] = self._tick_count
                     self._ember_count += 1
+                    self._ember_positions.add((x, y))
                     # _charred_count NOT incremented — ember lifecycle is separate
                 else:
                     tier = self._rng.randint(0, len(CHARRED_TIERS) // 2 - 1)
@@ -492,58 +526,65 @@ class FireEffect:
                     self._decay_interval[y][x] = self._rng.randint(DECAY_MIN_TICKS, DECAY_MAX_TICKS)
                     self._last_decay_tick[y][x] = self._tick_count
                     self._charred_count += 1
+                    self._charred_positions.add((x, y))
+                    heapq.heappush(self._decay_heap, (
+                        self._tick_count + self._decay_interval[y][x], x, y
+                    ))
 
     def _decay_charred(self) -> None:
-        """Advance glyph tiers for charred cells whose decay interval has elapsed."""
-        for y in range(self._height):
-            for x in range(self._width):
-                if self._cell_state[y][x] != CHARRED:
-                    continue
-                if self._is_ember[y][x]:
-                    continue  # embers manage their own lifecycle via _update_embers()
-                tier = self._charred_tier[y][x]
-                if tier >= len(CHARRED_TIERS):
-                    continue  # already fully decayed
-                if self._tick_count - self._last_decay_tick[y][x] >= self._decay_interval[y][x]:
-                    tier += 1
-                    self._charred_tier[y][x] = tier
-                    self._last_decay_tick[y][x] = self._tick_count
-                    if tier < len(CHARRED_TIERS):
-                        self._charred_char[y][x] = self._rng.choice(CHARRED_TIERS[tier])
-                    else:
-                        self._charred_count -= 1
+        """Pop charred cells whose decay timer expired from the min-heap."""
+        to_remove: list[tuple[int, int]] = []
+        while self._decay_heap and self._decay_heap[0][0] <= self._tick_count:
+            _, x, y = heapq.heappop(self._decay_heap)
+            if (x, y) not in self._charred_positions:
+                continue  # stale entry (removed by resize or other)
+            tier = self._charred_tier[y][x] + 1
+            self._charred_tier[y][x] = tier
+            self._last_decay_tick[y][x] = self._tick_count
+            if tier < len(CHARRED_TIERS):
+                self._charred_char[y][x] = self._rng.choice(CHARRED_TIERS[tier])
+                heapq.heappush(self._decay_heap, (
+                    self._tick_count + self._decay_interval[y][x], x, y
+                ))
+            else:
+                self._charred_count -= 1
+                to_remove.append((x, y))
+        for pos in to_remove:
+            self._charred_positions.discard(pos)
 
     def _update_embers(self) -> None:
         """Flicker embers and emit smoke; extinguish aged embers."""
         to_extinguish: list[tuple[int, int]] = []
-        for y in range(self._height):
-            for x in range(self._width):
-                if not self._is_ember[y][x]:
-                    continue
-                age = self._tick_count - self._ember_ignition_tick[y][x]
-                if y > 0 and self._rng.random() < SMOKE_EMIT_PROB:
-                    spawn_fx, spawn_fy = float(x), float(y - 1)
-                    init_vx, init_vy = self._flow_for_position(spawn_fx, spawn_fy)
-                    self._smoke.append(SmokeParticle(
-                        fx=spawn_fx,
-                        fy=spawn_fy,
-                        vx=init_vx,
-                        vy=init_vy,
-                        tier=SMOKE_START_TIER,
-                        last_decay_tick=self._tick_count,
-                    ))
-                if age >= EMBER_LIFETIME:
-                    to_extinguish.append((x, y))
+        for x, y in self._ember_positions:
+            age = self._tick_count - self._ember_ignition_tick[y][x]
+            if y > 0 and self._rng.random() < SMOKE_EMIT_PROB:
+                spawn_fx, spawn_fy = float(x), float(y - 1)
+                init_vx, init_vy = self._flow_for_position(spawn_fx, spawn_fy)
+                self._smoke.append(SmokeParticle(
+                    fx=spawn_fx,
+                    fy=spawn_fy,
+                    vx=init_vx,
+                    vy=init_vy,
+                    tier=SMOKE_START_TIER,
+                    last_decay_tick=self._tick_count,
+                ))
+            if age >= EMBER_LIFETIME:
+                to_extinguish.append((x, y))
 
         for x, y in to_extinguish:
             self._is_ember[y][x] = False
             self._ember_ignition_tick[y][x] = -1
             self._ember_count -= 1
+            self._ember_positions.discard((x, y))
             self._charred_tier[y][x] = EMBER_EXTINGUISH_TIER
             self._charred_char[y][x] = self._rng.choice(CHARRED_TIERS[EMBER_EXTINGUISH_TIER])
             self._decay_interval[y][x] = self._rng.randint(DECAY_MIN_TICKS, DECAY_MAX_TICKS)
             self._last_decay_tick[y][x] = self._tick_count
+            self._charred_positions.add((x, y))
             self._charred_count += 1
+            heapq.heappush(self._decay_heap, (
+                self._tick_count + self._decay_interval[y][x], x, y
+            ))
 
     def _update_smoke(self) -> None:
         """Move smoke via flow field, apply base rise, decay tiers; collect erase positions."""
@@ -552,12 +593,8 @@ class FireEffect:
             self._update_flow_field()
             self._last_flow_update = self._tick_count
 
-        self._smoke_erase = []
         next_smoke: list[SmokeParticle] = []
         for p in self._smoke:
-            orig_ix = round(p.fx)
-            orig_iy = round(p.fy)
-
             # Nudge velocity toward the sector's flow vector
             target_dx, target_dy = self._flow_for_position(p.fx, p.fy)
             vx = p.vx + (target_dx - p.vx) * SMOKE_VEL_LERP
@@ -570,7 +607,6 @@ class FireEffect:
             # Clamp horizontally, remove if risen off screen
             new_fx = max(0.0, min(float(self._width - 1), new_fx))
             if new_fy < 0:
-                self._smoke_erase.append((orig_ix, orig_iy))
                 continue
 
             # Tier decay
@@ -580,13 +616,7 @@ class FireEffect:
                 tier += 1
                 last_decay = self._tick_count
             if tier >= len(CHARRED_TIERS):
-                self._smoke_erase.append((orig_ix, orig_iy))
                 continue
-
-            new_ix = round(new_fx)
-            new_iy = round(new_fy)
-            if (new_ix, new_iy) != (orig_ix, orig_iy):
-                self._smoke_erase.append((orig_ix, orig_iy))
 
             next_smoke.append(SmokeParticle(new_fx, new_fy, vx, vy, tier, last_decay))
         self._smoke = next_smoke
@@ -594,144 +624,209 @@ class FireEffect:
     # -- Visual heat (DOOM fire) ------------------------------------------
 
     def _compute_heat(self) -> None:
-        """DOOM-fire algorithm: seed burning cells, propagate heat upward."""
+        """DOOM-fire algorithm: seed burning cells, propagate heat upward.
+
+        Uses sparse zeroing (only previous hot cells), direct seeding from
+        _burning_positions, and column-bounded propagation to avoid full-grid
+        scans.  A per-frame RNG keeps heat deterministic without consuming
+        values from the main RNG.  Tracks hot cells via a bool grid + list
+        (avoids per-cell tuple hashing).
+        """
         heat = self._heat
-        w, h = self._width, self._height
+        w = self._width
+        is_hot = self._is_hot
+        cell_state = self._cell_state
 
-        # Zero the grid
-        for y in range(h):
-            for x in range(w):
-                heat[y][x] = 0.0
+        # Zero only cells that were hot last frame
+        for x, y in self._hot_list:
+            heat[y][x] = 0.0
+            is_hot[y][x] = False
+        hot_list: list[tuple[int, int]] = []
+        shimmer: list[tuple[int, int]] = []
 
-        # Seed BURNING cells
-        for y in range(h):
-            for x in range(w):
-                if self._cell_state[y][x] == BURNING:
-                    age = self._tick_count - self._ignition_tick[y][x]
-                    ratio = age / BURN_DURATION if BURN_DURATION > 0 else 1.0
-                    if ratio < 0.3:
-                        heat[y][x] = 1.0
-                    elif ratio < 0.7:
-                        heat[y][x] = 0.7
-                    else:
-                        heat[y][x] = 0.4
+        if not self._burning_positions:
+            self._hot_list = hot_list
+            self._shimmer_cells = shimmer
+            return
 
-        # Propagate upward (bottom to top)
-        for y in range(h - 2, -1, -1):
-            for x in range(w):
-                drift = self._rng.randint(-1, 1)
+        # Seed BURNING cells directly from the tracked set; compute bounding box
+        min_x = w
+        max_x = 0
+        min_y = self._height
+        max_y = 0
+        for x, y in self._burning_positions:
+            age = self._tick_count - self._ignition_tick[y][x]
+            ratio = age / BURN_DURATION if BURN_DURATION > 0 else 1.0
+            if ratio < 0.3:
+                heat[y][x] = 1.0
+            elif ratio < 0.7:
+                heat[y][x] = 0.7
+            else:
+                heat[y][x] = 0.4
+            is_hot[y][x] = True
+            hot_list.append((x, y))
+            if x < min_x:
+                min_x = x
+            if x > max_x:
+                max_x = x
+            if y < min_y:
+                min_y = y
+            if y > max_y:
+                max_y = y
+
+        # Propagate upward within bounding box:
+        #   columns: burning extent ± margin (heat drifts ±1/row)
+        #   rows: from below bottom-most burning up to ~15 rows above topmost
+        margin = 15
+        col_lo = max(0, min_x - margin)
+        col_hi = min(w, max_x + margin + 1)
+        row_top = max(0, min_y - margin)
+        heat_rng = self._heat_rng
+        heat_rng.seed(self._tick_count)
+        for y in range(max_y - 1, row_top - 1, -1):
+            heat_row = heat[y]
+            heat_below = heat[y + 1]
+            is_hot_row = is_hot[y]
+            any_heat = False
+            # Even columns: full propagation with RNG
+            for x in range(col_lo & ~1, col_hi, 2):
+                drift = heat_rng.randint(-1, 1)
                 src_x = max(0, min(w - 1, x + drift))
-                decay = self._rng.random() * HEAT_DECAY_MAX
-                heat[y][x] = max(heat[y][x], heat[y + 1][src_x] - decay)
+                decay = heat_rng.random() * HEAT_DECAY_MAX
+                val = max(heat_row[x], heat_below[src_x] - decay)
+                if val > 0.0:
+                    heat_row[x] = val
+                    if not is_hot_row[x]:
+                        is_hot_row[x] = True
+                        hot_list.append((x, y))
+                    if val > 0.02 and cell_state[y][x] == CLEAR:
+                        shimmer.append((x, y))
+                    any_heat = True
+            # Odd columns: nearest-neighbor fill (no RNG), alternating direction
+            for x in range(col_lo | 1, col_hi, 2):
+                if y % 2 == 0:
+                    val = heat_row[x - 1] if x > 0 else 0.0
+                else:
+                    val = heat_row[x + 1] if x + 1 < w else 0.0
+                if val > 0.0:
+                    heat_row[x] = val
+                    if not is_hot_row[x]:
+                        is_hot_row[x] = True
+                        hot_list.append((x, y))
+                    if val > 0.02 and cell_state[y][x] == CLEAR:
+                        shimmer.append((x, y))
+                    any_heat = True
+            if not any_heat:
+                break
+
+        self._hot_list = hot_list
+        self._shimmer_cells = shimmer
 
     # -- Rendering --------------------------------------------------------
 
     def _render(self) -> list[OutputMessage]:
-        """Convert grid state + heat to OutputCells."""
-        cells: list[Cell] = []
+        """Convert grid state + heat to OutputCells using delta rendering.
+
+        Builds a dict buffer of all visible cells, then emits only cells
+        whose content changed since last frame.  Ghost erasure handles
+        cleanup of vacated positions.
+        """
+        buf: dict[tuple[int, int], Cell] = {}
         fade_alpha = self._get_fade_alpha()
+        w, h = self._width, self._height
 
-        for y in range(self._height):
-            for x in range(self._width):
-                state = self._cell_state[y][x]
-                h = self._heat[y][x]
+        # -- Build buffer of all currently visible cells --
 
-                if state == CHARRED:
-                    # Ember variant — flickering red-orange spot
-                    if self._is_ember[y][x]:
-                        ch = self._rng.choice(EMBER_CHARS)
-                        r = self._rng.uniform(0.85, 1.0)
-                        g = self._rng.uniform(0.10, 0.45)
-                        b = self._rng.random() * 0.05
-                        fg: Color = (r, g, b, 1.0)
-                        bg: Color = (0.05, 0.02, 0.01, 1.0)
-                        if fade_alpha < 1.0:
-                            fg = _fade_color(fg, fade_alpha)
-                            bg = _fade_color(bg, fade_alpha)
-                        cells.append(Cell(character=ch, coordinates=(x, y), fg=fg, bg=bg))
-                        continue
+        # Charred cells (background layer)
+        for x, y in self._charred_positions:
+            ch = self._charred_char[y][x]
+            if ch == " ":
+                buf[(x, y)] = Cell(
+                    character=" ", coordinates=(x, y), fg=None, bg=None,
+                )
+            else:
+                fg: Color = (0.15, 0.1, 0.08, 1.0)
+                bg: Color = (0.05, 0.03, 0.02, 1.0)
+                if fade_alpha < 1.0:
+                    fg = _fade_color(fg, fade_alpha)
+                    bg = _fade_color(bg, fade_alpha)
+                buf[(x, y)] = Cell(
+                    character=ch, coordinates=(x, y), fg=fg, bg=bg,
+                )
 
-                    # Skip fully-decayed cells
-                    if self._charred_tier[y][x] >= len(CHARRED_TIERS):
-                        continue
-                    ch = self._charred_char[y][x]
-                    if ch == " ":
-                        # Blank tier — erase the old glyph with no colors
-                        cells.append(Cell(
-                            character=" ",
-                            coordinates=(x, y),
-                            fg=None,
-                            bg=None,
-                        ))
-                    else:
-                        fg = (0.15, 0.1, 0.08, 1.0)
-                        bg: Color = (0.05, 0.03, 0.02, 1.0)
-                        if fade_alpha < 1.0:
-                            fg = _fade_color(fg, fade_alpha)
-                            bg = _fade_color(bg, fade_alpha)
-                        cells.append(Cell(
-                            character=ch,
-                            coordinates=(x, y),
-                            fg=fg,
-                            bg=bg,
-                        ))
-                elif state == BURNING:
-                    color = heat_to_color(h)
-                    ch = heat_to_char(h)
-                    fg = color
-                    bg = _dim_color(color, 0.6)
-                    if fade_alpha < 1.0:
-                        fg = _fade_color(fg, fade_alpha)
-                        bg = _fade_color(bg, fade_alpha)
-                    cells.append(Cell(
-                        character=ch,
-                        coordinates=(x, y),
-                        fg=fg,
-                        bg=bg,
-                    ))
-                elif h > 0.02:
-                    # Flame/smoke above the fire front
-                    color = heat_to_color(h)
-                    ch = heat_to_char(h)
-                    fg = color
-                    if fade_alpha < 1.0:
-                        fg = _fade_color(fg, fade_alpha)
-                    cells.append(Cell(
-                        character=ch,
-                        coordinates=(x, y),
-                        fg=fg,
-                        bg=None,
-                    ))
+        if self._burning_count > 0:
+            # BURNING cells (overwrite charred at same position if needed)
+            for x, y in self._burning_positions:
+                h_val = self._heat[y][x]
+                color = heat_to_color(h_val)
+                ch = heat_to_char(h_val)
+                fg = color
+                bg = _dim_color(color, 0.6)
+                if fade_alpha < 1.0:
+                    fg = _fade_color(fg, fade_alpha)
+                    bg = _fade_color(bg, fade_alpha)
+                buf[(x, y)] = Cell(
+                    character=ch, coordinates=(x, y), fg=fg, bg=bg,
+                )
 
-        # Smoke overlay — particles above ember positions
-        occupied = {
-            (x, y)
-            for y in range(self._height)
-            for x in range(self._width)
-            if self._cell_state[y][x] == BURNING
-        }
+            # Heat shimmer — CLEAR cells with heat above threshold
+            for x, y in self._shimmer_cells:
+                h_val = self._heat[y][x]
+                color = heat_to_color(h_val)
+                ch = heat_to_char(h_val)
+                fg = color
+                if fade_alpha < 1.0:
+                    fg = _fade_color(fg, fade_alpha)
+                buf[(x, y)] = Cell(
+                    character=ch, coordinates=(x, y), fg=fg, bg=None,
+                )
+
+        # Ember cells (overwrite charred at same position)
+        for x, y in self._ember_positions:
+            ch = self._rng.choice(EMBER_CHARS)
+            r = self._rng.uniform(0.85, 1.0)
+            g = self._rng.uniform(0.10, 0.45)
+            b = self._rng.random() * 0.05
+            fg = (r, g, b, 1.0)
+            bg = (0.05, 0.02, 0.01, 1.0)
+            if fade_alpha < 1.0:
+                fg = _fade_color(fg, fade_alpha)
+                bg = _fade_color(bg, fade_alpha)
+            buf[(x, y)] = Cell(character=ch, coordinates=(x, y), fg=fg, bg=bg)
+
+        # Smoke overlay (top layer, overwrites charred underneath)
+        occupied = self._burning_positions
         for p in self._smoke:
-            px = max(0, min(self._width - 1, round(p.fx)))
-            py = max(0, min(self._height - 1, round(p.fy)))
+            px = max(0, min(w - 1, round(p.fx)))
+            py = max(0, min(h - 1, round(p.fy)))
             if (px, py) in occupied or p.tier >= len(CHARRED_TIERS):
                 continue
             ch = CHARRED_TIERS[p.tier][0]
             smoke_fg: Color = (0.35, 0.30, 0.28, 0.7)
             if fade_alpha < 1.0:
                 smoke_fg = _fade_color(smoke_fg, fade_alpha)
-            cells.append(Cell(character=ch, coordinates=(px, py), fg=smoke_fg, bg=None))
+            buf[(px, py)] = Cell(character=ch, coordinates=(px, py), fg=smoke_fg, bg=None)
 
-        # Erase cells vacated by smoke; only needed where the main loop won't render anything
-        for ex, ey in self._smoke_erase:
-            if not (0 <= ex < self._width and 0 <= ey < self._height):
-                continue
-            state = self._cell_state[ey][ex]
-            will_render = state == BURNING or (
-                state == CHARRED
-                and (self._is_ember[ey][ex] or self._charred_tier[ey][ex] < len(CHARRED_TIERS))
-            )
-            if not will_render:
-                cells.append(Cell(character=" ", coordinates=(ex, ey), fg=None, bg=None))
+        # -- Ghost erasure + content delta --
+        current_positions = set(buf.keys())
+        cells: list[Cell] = []
+
+        # Ghost erasure: erase positions rendered last frame but not this frame
+        for pos in self._prev_render_positions - current_positions:
+            if 0 <= pos[0] < w and 0 <= pos[1] < h:
+                cells.append(Cell(character=" ", coordinates=pos, fg=None, bg=None))
+
+        # Content delta: only emit cells whose content changed
+        prev_content = self._prev_render_content
+        new_content: dict[tuple[int, int], tuple[str, tuple | None, tuple | None]] = {}
+        for pos, cell in buf.items():
+            key = (cell.character, cell.fg, cell.bg)
+            new_content[pos] = key
+            if prev_content.get(pos) != key:
+                cells.append(cell)
+
+        self._prev_render_positions = current_positions
+        self._prev_render_content = new_content
 
         if not cells:
             return []
@@ -768,6 +863,16 @@ class FireEffect:
     def phase(self) -> Phase:
         return self._phase
 
+    def cancel(self) -> None:
+        """Begin fast fade from any active phase."""
+        if self._phase in (Phase.SPREADING, Phase.BURNING, Phase.WASTELAND):
+            self._cancel_fade_start = self._tick_count
+            self._phase = Phase.CANCEL_FADING
+
+    @property
+    def is_done(self) -> bool:
+        return self._phase == Phase.DONE
+
     def tick(self) -> list[OutputMessage]:
         self._tick_count += 1
 
@@ -781,14 +886,6 @@ class FireEffect:
             self._idle_until = self._tick_count + self._pick_delay()
             self._phase = Phase.IDLE
             return []
-
-        # Cursor-shake cancel: transition active phases to CANCEL_FADING
-        if self._cancel_requested and self._phase in (
-            Phase.SPREADING, Phase.BURNING, Phase.WASTELAND
-        ):
-            self._cancel_fade_start = self._tick_count
-            self._phase = Phase.CANCEL_FADING
-        self._cancel_requested = False
 
         # Simulation
         if self._phase == Phase.SPREADING:
@@ -812,7 +909,8 @@ class FireEffect:
             self._update_smoke()
 
         # Visual heat
-        self._compute_heat()
+        if self._burning_count > 0:
+            self._compute_heat()
 
         # Render before phase transition (freeze fix)
         result = self._render()

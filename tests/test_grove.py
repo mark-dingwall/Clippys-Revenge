@@ -314,27 +314,33 @@ def test_attached_flowers_in_bounds(seed):
 # Cursor-shake cancellation
 # ---------------------------------------------------------------------------
 
-def _shake_msgs():
-    return [make_pty_json(cursor=(x, 5)) for x in [10, 30, 10, 30, 10]]
-
-
-def test_cursor_shake_cancels_grove_growing():
-    """Cursor shake during GROWING transitions to FADING."""
+def test_cancel_during_growing():
+    """cancel() during GROWING transitions to FADING."""
     effect = GroveEffect(seed=42, idle_secs=0)
     effect.on_pty_update(make_pty_update(80, 24))
     effect.tick()  # start effect
     assert effect.phase == Phase.GROWING
-    step(effect, _shake_msgs())
+    effect.cancel()
     assert effect.phase == Phase.FADING
 
 
-def test_cursor_shake_cancels_grove_perching():
-    """Cursor shake during PERCHING transitions to FADING."""
+def test_cancel_during_perching():
+    """cancel() during PERCHING transitions to FADING."""
     effect = GroveEffect(seed=42, idle_secs=0)
     effect.on_pty_update(make_pty_update(80, 24))
     assert run_to_phase(effect, Phase.PERCHING, max_ticks=GROWING_DURATION + 50)
-    step(effect, _shake_msgs())
+    effect.cancel()
     assert effect.phase == Phase.FADING
+
+
+def test_is_done_property():
+    """is_done is True iff phase is DONE."""
+    effect = GroveEffect(seed=42, idle_secs=0)
+    assert not effect.is_done
+    effect.on_pty_update(make_pty_update(40, 12))
+    max_ticks = GROWING_DURATION + PERCHING_DURATION + FADE_DURATION + 100
+    run_to_phase(effect, Phase.DONE, max_ticks=max_ticks)
+    assert effect.is_done
 
 
 # ---------------------------------------------------------------------------
