@@ -9,25 +9,6 @@ build/
 .pytest_cache/
 pytest-of-*/
 
-# Bubblewrap sandbox placeholder files
-HEAD
-config
-hooks
-objects
-refs
-.bash_profile
-.bashrc
-.env
-.gitconfig
-.gitmodules
-.idea
-.mcp.json
-.profile
-.ripgreprc
-.vscode
-.zprofile
-.zshrc
-
 # Virtual environment
 .venv/
 

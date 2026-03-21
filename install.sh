@@ -3,7 +3,7 @@
 #
 # Usage:
 #   bash install.sh           # install latest from GitHub
-#   bash install.sh --local   # install from this working directory (for development)
+#   bash install.sh --from-local   # install from this working directory (for development)
 #   curl -fsSL https://raw.githubusercontent.com/Axionatic/Clippys-Revenge/main/install.sh | bash
 
 set -euo pipefail
@@ -18,13 +18,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd || echo "")
 LOCAL=false
 for arg in "$@"; do
     case "$arg" in
-        --local) LOCAL=true ;;
+        --from-local) LOCAL=true ;;
         *) printf '\033[1;31m::\033[0m Unknown argument: %s\n' "$arg" >&2; exit 1 ;;
     esac
 done
 
 if [ "$LOCAL" = true ] && [ -z "$SCRIPT_DIR" ]; then
-    printf '\033[1;31m::\033[0m --local requires the script to be run from a file, not piped.\n' >&2
+    printf '\033[1;31m::\033[0m --from-local requires the script to be run from a file, not piped.\n' >&2
     exit 1
 fi
 
@@ -84,7 +84,7 @@ if [ "$py_major" -lt 3 ] || { [ "$py_major" -eq 3 ] && [ "$py_minor" -lt 10 ]; }
 fi
 ok "Python $py_version"
 
-# Git (not needed for --local installs)
+# Git (not needed for --from-local installs)
 if [ "$LOCAL" = false ]; then
     if ! command -v git &>/dev/null; then
         err "git not found. Install git and try again."
