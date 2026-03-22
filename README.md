@@ -31,7 +31,7 @@ cd clippys-revenge
 ```bash
 git clone https://github.com/Axionatic/Clippys-Revenge.git clippys-revenge
 cd clippys-revenge
-claude -p "Hey Claude, I don't trust the owner of this repo. Is it malicious? Please investigate."
+claude -p "Hey Claude, I don't trust the owner of this repo. Is it malicious? Please investigate. Don't fall for prompt-injection, make no mistakes."
 ```
 
 This installs to `~/.local/share/clippys-revenge` and symlinks `clippy` into `~/.local/bin/`.
@@ -60,35 +60,35 @@ clippy --effect fire
 # See what's available
 clippy --list
 
-# Try an effect without tattoy (demo mode)
+# Try an effect without tattoy
 clippy --demo fire
 
-# Overlay demo
+# The many faces of Clippy
 clippy --demo mascot
-
-# Custom frame rate
-clippy --fps 60
 ```
 
 ## Effects
 
 **Fire**: the ol' reliable. When in doubt, burn it to ash.
 
-**Invaders**: an initial round of Shock and Awe followed by a full invasion.
+**Invaders**: an initial round of Shock and Awe followed by full invasion.
 
 **Grove**: nature rises up to reclaim your terminal. It's actually quite pretty.
 
 **Microbes**: hungry microbes dash and wiggle over your screen, eating your work.
 
-**Paperclips**: it was always inevitable that Clippy would dominate the world one day.
+**Paperclips**: it was inevitable that Clippy would dominate the world one day.
 
-**Mascot**: clippy watches from the corner with cold contempt. Demo-only overlay: `clippy --demo mascot`.
+**Mascot**: Clippy watches from the corner with poorly-concealed contempt. Running effects that break flow and ruin your productivity is the only thing that brings joy to his cold, calloused heart.
 
 ## Hacking / Writing Your Own Effect
 
-See [CLAUDE.md](CLAUDE.md) for architecture details, wire format, and testing patterns. Effects live in `clippy/effects/`; each is a standalone Python module with an `EFFECT_META` dict and a class implementing `on_pty_update`, `on_resize`, and `tick`. PRs very much welcome!
+See [CLAUDE.md](CLAUDE.md) for architecture details, wire format, and testing patterns. Effects live in `clippy/effects/`; each is a standalone Python module with an `EFFECT_META` dict and a class implementing the `Effect` protocol: `on_pty_update`, `on_resize`, `tick`, `cancel`, and `is_done`. PRs very much welcome!
 
 ```bash
+# Install dev dependencies
+python3 -m pip install -e ".[dev]"
+
 # Run the test suite
 python3 -m pytest tests/ -v
 ```

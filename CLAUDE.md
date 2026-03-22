@@ -9,6 +9,9 @@ Clippy's Revenge is a Python plugin system for [tattoy](https://tattoy.sh) (a Ru
 ## Commands
 
 ```bash
+# Install dev dependencies
+python3 -m pip install -e ".[dev]"
+
 # Run all tests
 python3 -m pytest tests/ -v
 
@@ -49,10 +52,11 @@ User runs `clippy` CLI
 
 - `clippy/types.py` — Protocol dataclasses (`Cell`, `Pixel`, `PTYUpdate`, `TTYResize`, `OutputText`, `OutputCells`, `OutputPixels`) and JSON serialization. `from_json()` never raises — returns `None` for any malformed input. Also contains `CursorShakeDetector` (detects 5 x-axis reversals within 60 ticks; has `reset()` to clear state at phase boundaries).
 - `clippy/harness.py` — `Effect` protocol, `step()` (single-tick test seam), and `run()` (threaded stdin/stdout protocol loop with frame-rate control).
-- `clippy/unified.py` — `UnifiedEffect` wraps an inner effect class + mascot overlay in a single state machine: `WATCHING → IMMINENT_EARLY → IMMINENT_DEEP → ACTIVE → CACKLING → loop`. Single `CursorShakeDetector` governs cursor-shake gestures (only accepted during WATCHING and ACTIVE phases).
+- `clippy/mascot_render.py` — Shared mascot rendering: constants (face geometry, blink/pulse timing) and `render_mascot(visual_state, tick_count, width, height) -> list[Cell]`. Used by both `mascot.py` and `unified.py`.
+- `clippy/unified.py` — `UnifiedEffect` wraps an inner effect class + mascot overlay in a single state machine: `WATCHING → IMMINENT_EARLY → IMMINENT_DEEP → ACTIVE → CACKLING → loop`. Has its own `CursorShakeDetector` (only accepted during WATCHING and ACTIVE phases).
 - `clippy/unified_runner.py` — Tattoy plugin entry point. Reads `CLIPPY_EFFECT` env var, wraps effect class in `UnifiedEffect`, runs protocol loop.
 - `clippy/effects/` — Individual effect plugins. Each has `EFFECT_META` dict, `cancel()` method, `is_done` property, and `if __name__ == "__main__": run(Effect())`.
-- `clippy/effects/mascot.py` — Standalone mascot overlay (used only for `--demo mascot`). In tattoy mode, mascot rendering is handled by `UnifiedEffect`.
+- `clippy/effects/mascot.py` — Standalone mascot overlay (used only for `--demo mascot`; has its own `CursorShakeDetector`). In tattoy mode, mascot rendering is handled by `UnifiedEffect`.
 - `clippy/noise.py` — Pure Python 3D simplex noise (`noise3(x, y, z) -> float in [-1.0, 1.0]`). Used by fire and grove for flow fields. No dependencies.
 - `clippy/launcher.py` — CLI entry point. Discovers effects, generates tattoy config, execs tattoy. Uses `unified_runner.py` as the single plugin entry point (no separate mascot plugin).
 - `clippy/demo.py` — ANSI terminal renderer for `--demo` mode (no tattoy required).
@@ -60,7 +64,7 @@ User runs `clippy` CLI
 - `bin/clippy` — Shell wrapper that sets `PYTHONPATH` and execs `python3 -m clippy.launcher`.
 - `install.sh` / `uninstall.sh` — Install to `~/.local/share/clippys-revenge`, symlink `bin/clippy` to `~/.local/bin/clippy`.
 
-**Effect protocol:** Every effect class implements: `on_pty_update(PTYUpdate)`, `on_resize(TTYResize)`, `tick() -> list[OutputMessage]`, `cancel()`, and `is_done` property.
+**Effect protocol:** Defined formally in `harness.py` as a `typing.Protocol`. Every effect class implements: `on_pty_update(PTYUpdate)`, `on_resize(TTYResize)`, `tick() -> list[OutputMessage]`, `cancel()`, and `is_done` property.
 
 **Testing seam:** `step(effect, messages) -> list[str]` is the primary test surface for effects — it parses messages, dispatches callbacks, calls tick, and returns serialized JSON. No threading involved. Use this instead of `run()` for effect unit tests.
 
@@ -104,7 +108,8 @@ The golden files in `tests/golden/` are the source of truth for wire format.
   - Invaders: `IDLE → BOMBARDMENT → ACTIVE → FADING → DONE` (ACTIVE capped at 1050 ticks; `cancel()` skips to FADING)
   - Grove: `IDLE → GROWING → PERCHING → FADING → DONE` (`cancel()` skips to FADING)
   - Microbes: `IDLE → SWARMING → FADING → DONE` (`cancel()` skips to FADING)
-  - Mascot: standalone only (`--demo mascot`): `WATCHING → IMMINENT_EARLY → IMMINENT_DEEP → CACKLING → reset`
+  - Paperclips: `IDLE → SEEDING → REPLICATING → FILLING → EARTH_TRANSITION → EARTH_REPLICATING → FADING → DONE` (`cancel()` skips to FADING)
+  - Mascot: standalone only (`--demo mascot`): `WATCHING → IMMINENT_EARLY → IMMINENT_DEEP → CACKLING → DONE` (demo) or loop (live). Has own `CursorShakeDetector`.
 
 ## Mocking Quick Reference
 
@@ -118,3 +123,79 @@ The golden files in `tests/golden/` are the source of truth for wire format.
 | `time.monotonic` | `clock=fake_clock.now` injection | Deterministic tick timing |
 | `random.Random` | `rng=Random(42)` injection | Reproducible effect output |
 | `os.environ` | `monkeypatch.setenv` | Control `PATH`, `SHELL` |
+
+---
+
+## Code Review Sections (temporary — delete after review)
+
+### Section 1: Wire Protocol & Types
+
+**Files:** `clippy/types.py`, `tests/golden/` (9 golden JSON files), `tests/test_types.py`
+
+**What to look for:**
+- `from_json()` round-trip correctness for all message types (PTYUpdate, TTYResize)
+- CursorShakeDetector constants: WINDOW_TICKS=60, REVERSALS_NEEDED=5 — does this match the documented "2s @30fps"? (60 ticks / 30fps = 2s, yes)
+- `_validated_tuple()` edge cases — does it handle non-list inputs, wrong-length tuples, non-numeric elements?
+- Golden files in `tests/golden/` — do they match the actual wire format tattoy expects? Are there message types missing golden coverage?
+- Color type alias `tuple[float, float, float, float]` — sufficient or should it be a NamedTuple for clarity?
+- `to_json()` on OutputCells/OutputPixels — confirm direct array format (NOT nested `"cells"` / `"pixels"` key)
+
+### Section 2: Harness & Runtime
+
+**Files:** `clippy/harness.py`, `clippy/unified.py`, `clippy/unified_runner.py`, `tests/test_harness.py`, `tests/test_unified.py`
+
+**What to look for:**
+- `Effect` Protocol (harness.py:28-31) is incomplete — missing `cancel()` and `is_done` (will be fixed in Step 2)
+- Clear-frame logic: after effect returns OutputCells, a one-shot empty OutputCells is sent when tick() returns []. Does this work correctly for effects that alternate between OutputCells and OutputPixels?
+- Shutdown event / listener thread cleanup — any race conditions? The daemon thread reads stdin; main thread checks shutdown event. Is there a window where messages could be lost?
+- `unified_runner.py` error handling — what happens if CLIPPY_EFFECT names a nonexistent effect? (Answer: ValueError raised, unhandled — should this be caught?)
+- UnifiedEffect `_advance_queue` anti-repeat logic — does it work correctly with a 1-element effect list?
+- Frame budget calculation in `run()` — confirm sleep time is correctly computed as `max(0, budget - elapsed)`
+
+### Section 3: Effect Implementations
+
+**Files:** `clippy/effects/fire.py`, `invaders.py`, `grove.py`, `microbes.py`, `paperclips.py`, `mascot.py` — each with its corresponding `tests/test_*.py`
+
+**What to look for:**
+- `cancel()` / `is_done` consistency: mascot.py is missing both (will be fixed in Step 2). All other effects have them.
+- Phase transition exhaustiveness — can any effect get stuck in a phase forever? Check timeout/tick-count caps.
+- Mascot rendering duplication: `mascot.py` lines 12-82 + 170-232 are nearly identical to `unified.py` lines 25-63 + 257-321 (will be fixed in Step 3)
+- EFFECT_META consistency — do all effects have `name` and `description`? Only mascot has `overlay: True`.
+- `idle_secs=0` (demo mode) path — does every effect handle this correctly? (IDLE phase should be skipped)
+- Bounds checking: are all emitted coordinates guaranteed within `[0, width) x [0, height)`? Pixel effects: `[0, width) x [0, height*2)`?
+
+### Section 4: Launcher & CLI
+
+**Files:** `clippy/launcher.py`, `tests/test_launcher.py`
+
+**What to look for:**
+- TOML escaping in `generate_config()` — are paths with quotes, backslashes, or Unicode handled? (Test exists for backslash escaping)
+- PYTHONPATH manipulation — could the project root be added twice if already present?
+- Overlay filtering: `--list` and `--effect` exclude overlays, `--demo` allows them. Is this consistently enforced?
+- `find_tattoy()` fallback to `~/.cargo/bin/tattoy` — should this also check `/usr/local/bin`?
+- `ensure_executable()` — adds shebang + chmod. Is this idempotent? (Test says yes)
+- Error messages for missing tattoy, unknown effects, no effects discovered — are they helpful?
+- `--fps` validation — what happens with `--fps 0` or `--fps -1`?
+
+### Section 5: Demo & Rendering
+
+**Files:** `clippy/demo.py`, `clippy/ide_template.py`, `tests/test_demo.py`
+
+**What to look for:**
+- `demo_run()` phase-done check at line ~239: `getattr(effect, "phase", None)` — does this work for both UnifiedEffect (has `.phase` via `_phase`) and standalone effects? (UnifiedEffect exposes `phase` property? Check.)
+- `_highlight_python()` regex in ide_template.py — any edge cases with multiline strings or escaped quotes?
+- `build_template()` output dimensions — is it guaranteed to return exactly `height` rows of exactly `width` chars?
+- **Stale file tree** in ide_template.py `_TREE` (lines 21-45) — missing: grove.py, microbes.py, paperclips.py, mascot.py, unified.py, unified_runner.py, noise.py, and test files for grove/microbes/paperclips/mascot/unified/noise (will be fixed in Step 4c)
+- Half-block pixel rendering — does the upper/lower mapping (▀ for even y, ▄ for odd y) handle the boundary correctly at y=height*2-1?
+
+### Section 6: Packaging & Install
+
+**Files:** `pyproject.toml`, `install.sh`, `uninstall.sh`, `bin/clippy`
+
+**What to look for:**
+- `pyproject.toml` already declares version `1.0.0` — is this premature or intentional?
+- `bin/clippy` uses `readlink -f` — this doesn't exist on stock macOS (needs `greadlink` or a different approach). Is this a supported platform?
+- `install.sh` — does `--from-local` vs default (git clone) work correctly? Permission handling?
+- `uninstall.sh` does NOT clean `~/.cache/clippys-revenge/` (logs, config) — is this intentional? Should it offer to clean cache?
+- `py.typed` marker is missing — PEP 561 compliance (will be added in Step 4d)
+- Are there any files that should be in `.gitignore` but aren't?

@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "clippys-revenge"
+version = "1.0.0"
+description = "Chaotic terminal effects for tattoy"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8,<9",
+    "mypy>=1.0",
+]
+
+[tool.setuptools.packages.find]
+include = ["clippy*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
