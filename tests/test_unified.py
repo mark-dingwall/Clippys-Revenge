@@ -333,6 +333,70 @@ def test_mascot_separate_from_pixel_effect():
     assert "OutputCells" in types, "Mascot's OutputCells missing"
 
 
+def test_mascot_flattens_overlapping_cells():
+    """At overlapping positions: mascot char/fg wins, effect bg preserved."""
+    from clippy.types import Cell
+
+    w, h = 80, 24
+    corner_x = w - FACE_W - MARGIN
+    corner_y = h - FACE_H - MARGIN
+
+    fire_bg = (0.2, 0.0, 0.0, 1.0)
+
+    # Fake effect that emits cells overlapping the mascot's corner
+    class OverlappingEffect:
+        EFFECT_META = {"name": "overlap", "description": "test"}
+        def __init__(self, seed=None, idle_secs=None):
+            self._tick = 0
+        def on_pty_update(self, update): pass
+        def on_resize(self, resize): pass
+        def tick(self):
+            self._tick += 1
+            return [OutputCells(cells=[
+                Cell(character="X", coordinates=(corner_x, corner_y),
+                     fg=(1.0, 0.0, 0.0, 1.0), bg=fire_bg),
+                Cell(character="Y", coordinates=(corner_x + 1, corner_y),
+                     fg=(1.0, 0.0, 0.0, 1.0), bg=None),
+                Cell(character="Z", coordinates=(0, 0),
+                     fg=(1.0, 0.0, 0.0, 1.0), bg=None),
+            ])]
+        def cancel(self): pass
+        @property
+        def is_done(self):
+            return self._tick > 20
+
+    effect = UnifiedEffect(OverlappingEffect, idle_secs=0, seed=42)
+    effect.on_pty_update(make_pty_update(w, h))
+    outputs = effect.tick()
+    cells = cells_from_outputs(outputs)
+
+    # No duplicate coordinates — one cell per position
+    coords = [tuple(c.coordinates) for c in cells]
+    for coord in coords:
+        assert coords.count(coord) == 1, (
+            f"Duplicate cells at {coord} — flicker risk"
+        )
+
+    # Non-overlapping effect cell at (0,0) preserved
+    assert any(c.character == "Z" for c in cells), "Non-overlapping cell lost"
+
+    # At corner: mascot CHARACTER wins (not "X" from effect)
+    corner_cells = [c for c in cells if c.coordinates == (corner_x, corner_y)]
+    assert len(corner_cells) == 1
+    assert corner_cells[0].character != "X"
+
+    # At corner: effect's BG preserved behind mascot (fire still covers terminal)
+    assert corner_cells[0].bg == fire_bg, (
+        "Effect bg should be preserved behind mascot character"
+    )
+
+    # At corner+1: effect had bg=None, so mascot keeps its own bg
+    next_cells = [c for c in cells
+                  if c.coordinates == (corner_x + 1, corner_y)]
+    assert len(next_cells) == 1
+    assert next_cells[0].bg is None
+
+
 def test_cackling_alternates_frames():
     """CACKLING alternates body frame chars (live mode)."""
     w, h = 80, 24
@@ -530,3 +594,38 @@ def test_demo_mode_single_effect_no_cycling():
 
     assert run_to_phase(effect, UnifiedPhase.DONE, max_ticks=500)
     assert effect.phase == UnifiedPhase.DONE
+
+
+# ---------------------------------------------------------------------------
+# cancel() and is_done
+# ---------------------------------------------------------------------------
+
+def test_cancel_during_active_goes_to_done():
+    effect = UnifiedEffect([FakeEffect], idle_secs=0, seed=42)
+    effect.on_pty_update(make_pty_update(80, 24))
+    assert effect.phase == UnifiedPhase.ACTIVE
+    effect.cancel()
+    assert effect.phase == UnifiedPhase.DONE
+    assert effect._inner is None
+
+
+def test_cancel_during_watching():
+    effect = UnifiedEffect([FakeEffect], idle_secs=300, seed=42)
+    effect.on_pty_update(make_pty_update(80, 24))
+    assert effect.phase == UnifiedPhase.WATCHING
+    effect.cancel()
+    assert effect.phase == UnifiedPhase.DONE
+
+
+def test_is_done_false_during_active():
+    effect = UnifiedEffect([FakeEffect], idle_secs=0, seed=42)
+    effect.on_pty_update(make_pty_update(80, 24))
+    assert effect.phase == UnifiedPhase.ACTIVE
+    assert not effect.is_done
+
+
+def test_is_done_true_after_demo():
+    effect = UnifiedEffect([FakeEffect], idle_secs=0, seed=42)
+    effect.on_pty_update(make_pty_update(80, 24))
+    assert run_to_phase(effect, UnifiedPhase.DONE, max_ticks=300)
+    assert effect.is_done

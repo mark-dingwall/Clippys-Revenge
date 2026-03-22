@@ -639,7 +639,8 @@ class PaperclipsEffect:
 
     def _growth_rate(self) -> float:
         ticks_since = self._tick_count - self._replicating_start_tick
-        return min(GROWTH_RATE_CAP, GROWTH_RATE_BASE * (2.0 ** (ticks_since / GROWTH_DOUBLING_TICKS)))
+        rate = GROWTH_RATE_BASE * (2.0 ** (ticks_since / GROWTH_DOUBLING_TICKS))
+        return rate if rate < GROWTH_RATE_CAP else GROWTH_RATE_CAP
 
     def _eligible_tiers(self) -> list[list[list[tuple[int, int, str]]]]:
         """Return template lists for all tiers the current clip count qualifies for."""

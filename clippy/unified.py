@@ -1,14 +1,21 @@
 """Unified effect — single state machine wrapping an inner effect + mascot overlay."""
 from __future__ import annotations
 
-import math
 import os
 import random
 from enum import IntEnum
 
+from clippy.harness import Effect
+from clippy.mascot_render import (
+    BLINK_DURATION,
+    CACKLE_FLIP_TICKS,
+    FACE_H,
+    FACE_W,
+    MARGIN,
+    render_mascot,
+)
 from clippy.types import (
     Cell,
-    Color,
     CursorShakeDetector,
     OutputCells,
     OutputMessage,
@@ -17,50 +24,6 @@ from clippy.types import (
 )
 
 FPS = 30
-
-# ---------------------------------------------------------------------------
-# Mascot rendering constants (from mascot.py)
-# ---------------------------------------------------------------------------
-
-FACE_W = 4
-FACE_H = 5
-MARGIN = 1
-
-BLINK_PERIOD = 100
-BLINK_DURATION = 3
-
-EYE_PULSE_PERIOD = 30
-EYE_ALPHA_MIN = 0.7
-EYE_ALPHA_MAX = 1.0
-
-CACKLE_FLIP_TICKS = 10
-
-
-# Body chars for WATCHING / IMMINENT phases (rounded box drawing)
-_BODY_ROUNDED: list[tuple[int, int, str, bool]] = [
-    (0, 0, "╭", False), (1, 0, "─", False), (2, 0, "─", False), (3, 0, "╮", False),
-    (1, 1, "╭", False), (2, 1, "╮", False),
-    (0, 2, "│", False), (1, 2, "│", False), (2, 2, "╰", False), (3, 2, "╯", False),
-    (0, 3, "│", False), (1, 3, "╰", False), (2, 3, "─", False), (3, 3, "╯", False),
-    (0, 4, "╰", False), (1, 4, "─", False), (2, 4, "─", False), (3, 4, "╯", False),
-]
-
-_CACKLE_BODY_F0: list[tuple[int, int, str, bool]] = [
-    (0, 0, "╭", False), (1, 0, "─", False), (2, 0, "─", False), (3, 0, "╮", False),
-    (0, 2, "│", False), (1, 2, "╲", True),  (2, 2, "╱", True),  (3, 2, "╯", False),
-    (0, 3, "│", False), (1, 3, "╰", False), (2, 3, "─", False), (3, 3, "╯", False),
-    (0, 4, "╰", False), (1, 4, "─", False), (2, 4, "─", False), (3, 4, "╯", False),
-]
-
-_CACKLE_BODY_F1: list[tuple[int, int, str, bool]] = [
-    (0, 0, "╔", False), (1, 0, "═", False), (2, 0, "═", False), (3, 0, "╗", False),
-    (0, 2, "║", False), (1, 2, "╲", True),  (2, 2, "╱", True),  (3, 2, "╝", False),
-    (0, 3, "║", False), (1, 3, "╚", False), (2, 3, "═", False), (3, 3, "╝", False),
-    (0, 4, "╚", False), (1, 4, "═", False), (2, 4, "═", False), (3, 4, "╝", False),
-]
-
-_EYE_L_POS = (0, 1)
-_EYE_R_POS = (3, 1)
 
 
 # ---------------------------------------------------------------------------
@@ -108,7 +71,7 @@ class UnifiedEffect:
         self._demo_mode = idle_secs == 0
         self._phase = UnifiedPhase.WATCHING
         self._shake = CursorShakeDetector()
-        self._inner = None  # type: ignore[assignment]
+        self._inner: Effect | None = None
         self._tick_count = BLINK_DURATION  # match mascot init
         self._width = 0
         self._height = 0
@@ -184,6 +147,17 @@ class UnifiedEffect:
     def phase(self) -> UnifiedPhase:
         return self._phase
 
+    def cancel(self) -> None:
+        if self._inner is not None and self._phase == UnifiedPhase.ACTIVE:
+            self._inner.cancel()
+        if self._phase != UnifiedPhase.DONE:
+            self._phase = UnifiedPhase.DONE
+            self._inner = None
+
+    @property
+    def is_done(self) -> bool:
+        return self._phase == UnifiedPhase.DONE
+
     def _update_phase(self) -> None:
         t = self._tick_count
         if self._phase == UnifiedPhase.WATCHING and t >= self._imminent_early_start:
@@ -228,97 +202,74 @@ class UnifiedEffect:
     # -- Mascot rendering -------------------------------------------------
 
     def _merge_mascot(self, inner_outputs: list[OutputMessage]) -> list[OutputMessage]:
-        """Merge mascot cells into the inner effect's output.
+        """Flatten mascot on top of the inner effect's output.
 
-        If the inner effect emits OutputCells, append mascot cells to the last
-        OutputCells message (tattoy replaces the layer per message type, so a
-        separate OutputCells would overwrite the effect). If the inner effect
-        uses OutputPixels (e.g. microbes), the mascot goes as a separate
-        OutputCells since they're distinct message types.
+        At overlapping positions, the mascot's character and fg win (so the
+        mascot is visible), but the effect's bg is preserved (so the effect's
+        destruction of the terminal content remains visible behind the mascot
+        wireframe).  This prevents flicker while keeping the effect's coverage.
+
+        If the inner effect emits OutputCells, the mascot is merged into the
+        last OutputCells message (tattoy replaces the layer per message type,
+        so a separate OutputCells would overwrite the effect). If the inner
+        effect uses OutputPixels (e.g. microbes), the mascot goes as a
+        separate OutputCells since they're distinct message types.
         """
         mascot_msgs = self._render_mascot()
         if not mascot_msgs:
             return inner_outputs
 
-        mascot_cells = mascot_msgs[0].cells  # always OutputCells
+        mascot_msg = mascot_msgs[0]
+        assert isinstance(mascot_msg, OutputCells)
+        mascot_cells = mascot_msg.cells
 
         # Find the last OutputCells in inner_outputs to merge into
         for i in range(len(inner_outputs) - 1, -1, -1):
-            if isinstance(inner_outputs[i], OutputCells):
-                inner_outputs[i] = OutputCells(
-                    cells=inner_outputs[i].cells + mascot_cells,
-                )
+            msg = inner_outputs[i]
+            if isinstance(msg, OutputCells):
+                # Build lookup: position -> effect cell
+                effect_by_pos = {tuple(c.coordinates): c for c in msg.cells}
+                mascot_by_pos = {tuple(c.coordinates): c for c in mascot_cells}
+
+                # Non-overlapping effect cells pass through unchanged
+                merged = [c for c in msg.cells
+                          if tuple(c.coordinates) not in mascot_by_pos]
+
+                # Overlapping positions: mascot char/fg, effect bg
+                for mc in mascot_cells:
+                    pos = tuple(mc.coordinates)
+                    ec = effect_by_pos.get(pos)
+                    if ec is not None and ec.bg is not None:
+                        merged.append(Cell(
+                            character=mc.character,
+                            coordinates=mc.coordinates,
+                            fg=mc.fg,
+                            bg=ec.bg,
+                        ))
+                    else:
+                        merged.append(mc)
+
+                inner_outputs[i] = OutputCells(cells=merged)
                 return inner_outputs
 
         # No OutputCells in inner output (e.g. microbes uses OutputPixels) —
         # emit mascot as a separate message (different wire type, no conflict)
         return inner_outputs + mascot_msgs
 
+    _PHASE_TO_STATE = {
+        UnifiedPhase.WATCHING: "watching",
+        UnifiedPhase.IMMINENT_EARLY: "imminent_early",
+        UnifiedPhase.IMMINENT_DEEP: "imminent_deep",
+        UnifiedPhase.ACTIVE: "active",
+        UnifiedPhase.CACKLING: "cackling",
+    }
+
     def _render_mascot(self) -> list[OutputMessage]:
-        corner_x = self._width - FACE_W - MARGIN
-        corner_y = self._height - FACE_H - MARGIN
-        if corner_x < 0 or corner_y < 0:
+        state = self._PHASE_TO_STATE.get(self._phase)
+        if state is None:
             return []
-
-        phase = self._phase
-        t = self._tick_count
-
-        # Map unified phase to mascot appearance
-        if phase == UnifiedPhase.WATCHING:
-            body_color: Color = (0.6, 0.6, 0.6, 1.0)
-            eye_color: Color = (1.0, 1.0, 1.0, 1.0)
-        elif phase == UnifiedPhase.IMMINENT_EARLY:
-            body_color = (1.0, 0.7, 0.0, 1.0)
-            eye_color = (1.0, 0.7, 0.0, 1.0)
-        elif phase in (UnifiedPhase.IMMINENT_DEEP, UnifiedPhase.ACTIVE):
-            # Red pulsing eyes — same appearance for both
-            alpha = EYE_ALPHA_MIN + (EYE_ALPHA_MAX - EYE_ALPHA_MIN) * (
-                math.sin(2 * math.pi * t / EYE_PULSE_PERIOD) * 0.5 + 0.5
-            )
-            body_color = (1.0, 0.0, 0.0, alpha)
-            eye_color = (1.0, 0.0, 0.0, alpha)
-        else:  # CACKLING
-            body_color = (1.0, 0.8, 0.0, 1.0)
-            eye_color = (1.0, 1.0, 1.0, 1.0)
-
-        # Build char list
-        if phase in (UnifiedPhase.WATCHING, UnifiedPhase.IMMINENT_EARLY,
-                     UnifiedPhase.IMMINENT_DEEP, UnifiedPhase.ACTIVE):
-            body_chars = _BODY_ROUNDED
-            blink = phase == UnifiedPhase.WATCHING and t % BLINK_PERIOD < BLINK_DURATION
-            if phase == UnifiedPhase.WATCHING:
-                eye_l = "─" if blink else "ʘ"
-                eye_r = "─" if blink else "ʘ"
-            elif phase == UnifiedPhase.IMMINENT_EARLY:
-                eye_l = "◎"
-                eye_r = "◎"
-            else:  # IMMINENT_DEEP or ACTIVE
-                eye_l = "◉"
-                eye_r = "◉"
-            all_chars = body_chars + [
-                (_EYE_L_POS[0], _EYE_L_POS[1], eye_l, True),
-                (_EYE_R_POS[0], _EYE_R_POS[1], eye_r, True),
-            ]
-        else:  # CACKLING
-            frame = (t // CACKLE_FLIP_TICKS) % 2
-            body_chars = _CACKLE_BODY_F0 if frame == 0 else _CACKLE_BODY_F1
-            all_chars = body_chars + [
-                (0, 1, ">", True),
-                (1, 1, "▁", True),
-                (2, 1, "▁", True),
-                (3, 1, "<", True),
-            ]
-
-        cells = [
-            Cell(
-                character=char,
-                coordinates=(corner_x + rc, corner_y + rr),
-                fg=eye_color if is_eye else body_color,
-                bg=None,
-            )
-            for rc, rr, char, is_eye in all_chars
-        ]
-        return [OutputCells(cells=cells)]
+        cells = render_mascot(state, self._tick_count, self._width, self._height)
+        return [OutputCells(cells=cells)] if cells else []
 
     # -- Main tick --------------------------------------------------------
 

@@ -411,3 +411,45 @@ def test_cursor_shake_recalculates_cackle_timing():
     expected_cackle_start = effect._tick_count + round(5 * FPS)
     # Allow a small tolerance since step() also calls tick()
     assert abs(effect._cackle_start - expected_cackle_start) <= 1
+
+
+# ---------------------------------------------------------------------------
+# cancel() and is_done
+# ---------------------------------------------------------------------------
+
+def test_cancel_during_watching():
+    effect = MascotEffect(idle_secs=300)
+    effect.on_pty_update(make_pty_update(80, 24))
+    assert effect.phase == Phase.WATCHING
+    effect.cancel()
+    assert effect.phase == Phase.DONE
+    assert effect.is_done
+
+
+def test_cancel_during_imminent_deep():
+    effect = MascotEffect(idle_secs=0)
+    effect.on_pty_update(make_pty_update(80, 24))
+    assert run_to_phase(effect, Phase.IMMINENT_DEEP)
+    effect.cancel()
+    assert effect.phase == Phase.DONE
+    assert effect.is_done
+
+
+def test_cancel_during_cackling_is_noop():
+    effect = MascotEffect(idle_secs=0)
+    effect.on_pty_update(make_pty_update(80, 24))
+    assert run_to_phase(effect, Phase.CACKLING)
+    effect.cancel()
+    assert effect.phase == Phase.CACKLING
+
+
+def test_is_done_initially_false():
+    effect = MascotEffect(idle_secs=0)
+    assert not effect.is_done
+
+
+def test_is_done_after_demo_lifecycle():
+    effect = MascotEffect(idle_secs=0)
+    effect.on_pty_update(make_pty_update(80, 24))
+    assert run_to_phase(effect, Phase.DONE)
+    assert effect.is_done

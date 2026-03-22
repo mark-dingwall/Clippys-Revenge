@@ -43,6 +43,7 @@ def stub_effect():
         def __init__(self):
             self.updates = []
             self.resizes = []
+            self._done = False
 
         def on_pty_update(self, update):
             self.updates.append(update)
@@ -57,6 +58,13 @@ def stub_effect():
                 fg=(1.0, 1.0, 1.0, 1.0),
                 bg=None,
             )]
+
+        def cancel(self):
+            self._done = True
+
+        @property
+        def is_done(self):
+            return self._done
 
     return StubEffect()
 
