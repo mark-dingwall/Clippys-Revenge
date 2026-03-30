@@ -10,6 +10,40 @@ from dataclasses import dataclass
 
 Color = tuple[float, float, float, float]  # RGBA, 0.0-1.0
 
+# JSON escape for cell characters — most are single printable chars
+_JSON_ESCAPE = {'"': '\\"', '\\': '\\\\', '\n': '\\n', '\r': '\\r', '\t': '\\t'}
+
+# Step 14: Pre-computed ASCII escape table (index by ord)
+_CHAR_TABLE: list[str] = []
+for _i in range(128):
+    _ch = chr(_i)
+    if _ch in _JSON_ESCAPE:
+        _CHAR_TABLE.append(_JSON_ESCAPE[_ch])
+    elif _i < 0x20:
+        _CHAR_TABLE.append(f"\\u{_i:04x}")
+    else:
+        _CHAR_TABLE.append(_ch)
+
+
+def _json_char(ch: str) -> str:
+    """Escape a character for embedding in a JSON string value."""
+    o = ord(ch)
+    if o < 128:
+        return _CHAR_TABLE[o]
+    return ch
+
+
+# Step 13: Dict-backed color string cache
+_color_cache: dict[Color, str] = {}
+
+
+def _json_color(c: Color) -> str:
+    s = _color_cache.get(c)
+    if s is None:
+        s = f"[{c[0]}, {c[1]}, {c[2]}, {c[3]}]"
+        _color_cache[c] = s
+    return s
+
 
 @dataclass(slots=True)
 class Cell:
@@ -46,12 +80,14 @@ class OutputText:
     bg: Color | None
 
     def to_json(self) -> str:
-        return json.dumps({"output_text": {
-            "text": self.text,
-            "coordinates": list(self.coordinates),
-            "fg": list(self.fg) if self.fg is not None else None,
-            "bg": list(self.bg) if self.bg is not None else None,
-        }})
+        text_escaped = json.dumps(self.text)  # handles all string escaping
+        fg = _json_color(self.fg) if self.fg is not None else "null"
+        bg = _json_color(self.bg) if self.bg is not None else "null"
+        return (
+            f'{{"output_text": {{"text": {text_escaped}, '
+            f'"coordinates": [{self.coordinates[0]}, {self.coordinates[1]}], '
+            f'"fg": {fg}, "bg": {bg}}}}}'
+        )
 
 
 @dataclass(slots=True)
@@ -59,15 +95,36 @@ class OutputCells:
     cells: list[Cell]
 
     def to_json(self) -> str:
-        return json.dumps({"output_cells": [
-            {
-                "character": c.character,
-                "coordinates": list(c.coordinates),
-                "fg": list(c.fg) if c.fg is not None else None,
-                "bg": list(c.bg) if c.bg is not None else None,
-            }
-            for c in self.cells
-        ]})
+        parts: list[str] = []
+        cc = _color_cache
+        ct = _CHAR_TABLE
+        for c in self.cells:
+            # Inline character escape
+            o = ord(c.character)
+            ch = ct[o] if o < 128 else c.character
+            # Inline color cache lookups
+            fg_color = c.fg
+            if fg_color is not None:
+                fg = cc.get(fg_color)
+                if fg is None:
+                    fg = f"[{fg_color[0]}, {fg_color[1]}, {fg_color[2]}, {fg_color[3]}]"
+                    cc[fg_color] = fg
+            else:
+                fg = "null"
+            bg_color = c.bg
+            if bg_color is not None:
+                bg = cc.get(bg_color)
+                if bg is None:
+                    bg = f"[{bg_color[0]}, {bg_color[1]}, {bg_color[2]}, {bg_color[3]}]"
+                    cc[bg_color] = bg
+            else:
+                bg = "null"
+            parts.append(
+                f'{{"character": "{ch}", '
+                f'"coordinates": [{c.coordinates[0]}, {c.coordinates[1]}], '
+                f'"fg": {fg}, "bg": {bg}}}'
+            )
+        return '{"output_cells": [' + ", ".join(parts) + "]}"
 
 
 @dataclass(slots=True)
@@ -75,13 +132,22 @@ class OutputPixels:
     pixels: list[Pixel]
 
     def to_json(self) -> str:
-        return json.dumps({"output_pixels": [
-            {
-                "coordinates": list(p.coordinates),
-                "color": list(p.color) if p.color is not None else None,
-            }
-            for p in self.pixels
-        ]})
+        parts: list[str] = []
+        cc = _color_cache
+        for p in self.pixels:
+            p_color = p.color
+            if p_color is not None:
+                color = cc.get(p_color)
+                if color is None:
+                    color = f"[{p_color[0]}, {p_color[1]}, {p_color[2]}, {p_color[3]}]"
+                    cc[p_color] = color
+            else:
+                color = "null"
+            parts.append(
+                f'{{"coordinates": [{p.coordinates[0]}, {p.coordinates[1]}], '
+                f'"color": {color}}}'
+            )
+        return '{"output_pixels": [' + ", ".join(parts) + "]}"
 
 
 InputMessage = PTYUpdate | TTYResize
