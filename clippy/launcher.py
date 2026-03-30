@@ -48,7 +48,7 @@ def generate_config(
     """Generate tattoy.toml (and palette.toml if absent) and return the config dir path.
 
     config_dir defaults to ~/.cache/clippys-revenge/ (overridable for tests).
-    Each path in effect_paths gets its own [[plugins]] block at layer 2.
+    Each path in effect_paths gets its own [[plugins]] block at layer 1.
     """
     if shell_cmd is None:
         shell_cmd = os.environ.get("SHELL", "/bin/bash")
@@ -75,7 +75,7 @@ def generate_config(
             f"[[plugins]]\n"
             f'name = "{_escape_toml_string(plugin_name)}"\n'
             f'path = "{_escape_toml_string(effect_path)}"\n'
-            f"layer = 2\n"
+            f"layer = 1\n"
         )
 
     (out_dir / "tattoy.toml").write_text(toml_content)

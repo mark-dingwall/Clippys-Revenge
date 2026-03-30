@@ -116,7 +116,7 @@ class TestGenerateConfig:
         assert 'path = "/path/to/fire.py"' in content
         assert "[[plugins]]" in content
         assert 'name = "fire"' in content
-        assert "layer = 2" in content
+        assert "layer = 1" in content
         assert "show_tattoy_indicator = false" in content
         assert "show_startup_logo = false" in content
         assert "[keybindings]" in content
@@ -304,4 +304,4 @@ class TestGenerateConfigSinglePlugin:
         )
         content = (Path(config_dir) / "tattoy.toml").read_text()
         assert content.count("[[plugins]]") == 1
-        assert "layer = 2" in content
+        assert "layer = 1" in content
