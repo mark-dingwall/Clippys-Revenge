@@ -699,57 +699,22 @@ def test_is_done_property():
 # Delta rendering
 # ---------------------------------------------------------------------------
 
-def test_delta_reduces_output():
-    """During WASTELAND, consecutive frames with no decay emit fewer cells."""
+def test_full_frame_coverage():
+    """Every frame emits all visible cells (tattoy replaces the layer per message)."""
     effect = FireEffect(seed=42, idle_secs=0)
     effect.on_pty_update(make_pty_update(20, 8))
     assert run_to_phase(effect, Phase.WASTELAND, max_ticks=600), "Never reached WASTELAND"
 
-    # First WASTELAND frame: everything is "new" relative to prev_content
+    # Two consecutive WASTELAND frames should emit the same positions
     outputs_first = effect.tick()
-    count_first = sum(len(out.cells) for out in outputs_first)
+    positions_first = {cell.coordinates for out in outputs_first for cell in out.cells}
 
-    # Second frame: charred cells that didn't decay should be skipped
     outputs_second = effect.tick()
-    count_second = sum(len(out.cells) for out in outputs_second)
+    positions_second = {cell.coordinates for out in outputs_second for cell in out.cells}
 
-    assert count_second < count_first, (
-        f"Second frame ({count_second} cells) should emit fewer cells than first ({count_first})"
-    )
-
-
-def test_ghost_erasure_on_smoke_move():
-    """When smoke moves, the vacated position is handled by ghost erasure or charred re-emission."""
-    effect = FireEffect(seed=0, idle_secs=0)
-    effect.on_pty_update(make_pty_update(20, 8))
-    assert run_to_phase(effect, Phase.WASTELAND, max_ticks=600), "Never reached WASTELAND"
-
-    # Inject a smoke particle at a known position
-    from clippy.effects.fire import SmokeParticle
-    effect._smoke = [SmokeParticle(
-        fx=10.0, fy=4.0, vx=0.0, vy=0.0, tier=4,
-        last_decay_tick=effect._tick_count,
-    )]
-
-    # First tick: smoke renders at (10, 4)
-    effect.tick()
-    assert (10, 4) in effect._prev_render_positions
-
-    # Move smoke far away so it vacates (10, 4)
-    effect._smoke = [SmokeParticle(
-        fx=5.0, fy=2.0, vx=0.0, vy=0.0, tier=4,
-        last_decay_tick=effect._tick_count,
-    )]
-    outputs = effect.tick()
-
-    # The old position (10, 4) should appear as either a ghost-erase or charred cell
-    emitted_positions = set()
-    for out in outputs:
-        for cell in out.cells:
-            emitted_positions.add(cell.coordinates)
-    assert (10, 4) in emitted_positions, (
-        "Vacated smoke position (10,4) not in emitted cells"
-    )
+    # Stable charred cells must appear in both frames
+    stable = positions_first & positions_second
+    assert len(stable) > 0, "No stable positions across frames"
 
 
 def test_smoke_over_charred_restores():

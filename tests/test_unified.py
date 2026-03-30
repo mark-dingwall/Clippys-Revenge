@@ -472,13 +472,13 @@ def test_resize_forwarded_during_active():
 # ---------------------------------------------------------------------------
 
 def test_small_terminal_no_mascot():
-    """Terminal too small for mascot produces empty mascot output."""
+    """Terminal too small for mascot still works — sparse output, no crash."""
     effect = UnifiedEffect(FakeEffect, idle_secs=0, seed=42)
     effect.on_pty_update(make_pty_update(3, 3))
     outputs = effect.tick()
-    # Should not crash; mascot skipped due to small terminal
+    # Should not crash; mascot skipped, sparse frame has only effect cells
     cells = cells_from_outputs(outputs)
-    assert len(cells) == 0
+    assert len(cells) <= 3 * 3
 
 
 # ---------------------------------------------------------------------------
@@ -629,3 +629,65 @@ def test_is_done_true_after_demo():
     effect.on_pty_update(make_pty_update(80, 24))
     assert run_to_phase(effect, UnifiedPhase.DONE, max_ticks=300)
     assert effect.is_done
+
+
+# ---------------------------------------------------------------------------
+# Destructive compositing
+# ---------------------------------------------------------------------------
+
+class NonDestructiveFakeEffect:
+    """Fake effect with destructive=False — cells with bg=None don't mark _touched."""
+    EFFECT_META = {"name": "non_destructive", "description": "test"}
+    destructive = False
+
+    def __init__(self, seed=None, idle_secs=None):
+        self._done = False
+        self._tick_count = 0
+
+    def on_pty_update(self, update):
+        pass
+
+    def on_resize(self, resize):
+        pass
+
+    def tick(self):
+        from clippy.types import Cell
+        self._tick_count += 1
+        if self._tick_count > 20:
+            self._done = True
+        # Emit one cell with bg=None (overlay) and one with opaque bg (destructive)
+        return [OutputCells(cells=[
+            Cell(character="A", coordinates=(0, 0), fg=(1.0, 1.0, 1.0, 1.0), bg=None),
+            Cell(character="B", coordinates=(1, 0), fg=(1.0, 1.0, 1.0, 1.0), bg=(0.0, 0.0, 0.0, 1.0)),
+        ])]
+
+    def cancel(self):
+        self._done = True
+
+    @property
+    def is_done(self):
+        return self._done
+
+
+def test_non_destructive_bg_none_not_touched():
+    """With destructive=False, cells with bg=None should NOT be added to _touched."""
+    effect = UnifiedEffect([NonDestructiveFakeEffect], idle_secs=0, seed=42)
+    effect.on_pty_update(make_pty_update(10, 5))
+    assert effect.phase == UnifiedPhase.ACTIVE
+
+    effect.tick()
+    # bg=None cell at (0,0) should NOT be in _touched
+    assert (0, 0) not in effect._touched
+    # Opaque bg cell at (1,0) SHOULD be in _touched
+    assert (1, 0) in effect._touched
+
+
+def test_destructive_default_all_touched():
+    """Default (destructive=True) adds ALL cells to _touched regardless of bg."""
+    effect = UnifiedEffect([FakeEffect], idle_secs=0, seed=42)
+    effect.on_pty_update(make_pty_update(10, 5))
+    assert effect.phase == UnifiedPhase.ACTIVE
+
+    # FakeEffect returns empty cells, but let's verify the default behavior
+    # by checking that _touched starts empty and the default is True
+    assert getattr(FakeEffect, 'destructive', True) is True

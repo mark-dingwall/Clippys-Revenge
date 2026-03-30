@@ -704,3 +704,71 @@ def test_solid_wave_front():
             assert pos in effect._consumed or pos in effect._counter_positions, (
                 f"Position {pos} at dist {dist:.1f} not consumed (radius={effect._wave_radius:.1f})"
             )
+
+
+def test_fading_covers_all_positions_with_opaque_bg():
+    """During FADING, every screen position must have opaque bg coverage.
+
+    The space background layer emits opaque black cells at ALL positions first,
+    then content cells (stars, clips) overlay on top with bg=None.  Unified's
+    _overlay processes cells in order, so content cells inherit the opaque bg
+    from the space layer.  We verify this by simulating _overlay semantics.
+    """
+    effect = PaperclipsEffect(seed=42, idle_secs=0)
+    w, h = 20, 8
+    effect.on_pty_update(make_pty_update(w, h, density=0.3, seed=42))
+    assert run_to_phase(effect, Phase.FADING, max_ticks=15000)
+
+    outputs = effect.tick()
+    cells = []
+    for out in outputs:
+        if isinstance(out, OutputCells):
+            cells.extend(out.cells)
+
+    # Simulate _overlay: process cells in order, inheriting bg when bg=None
+    resolved: dict[tuple[int, int], Cell] = {}
+    for cell in cells:
+        pos = tuple(cell.coordinates)
+        if cell.bg is not None:
+            resolved[pos] = cell
+        else:
+            under = resolved.get(pos)
+            resolved[pos] = Cell(
+                character=cell.character,
+                coordinates=cell.coordinates,
+                fg=cell.fg,
+                bg=under.bg if under is not None else None,
+            )
+
+    # Every screen position should be covered with non-None bg.
+    # Counter cells have intentionally semi-transparent bg (COUNTER_BG alpha=0.7)
+    # so we only require bg is not None (opaque space bg provides the base).
+    for y in range(h):
+        for x in range(w):
+            pos = (x, y)
+            assert pos in resolved, f"Position {pos} missing from FADING output"
+            cell = resolved[pos]
+            assert cell.bg is not None, f"Position {pos} has bg=None during FADING"
+
+
+def test_earth_transition_has_opaque_bg():
+    """During EARTH_TRANSITION, all positions should have opaque bg (space background)."""
+    effect = PaperclipsEffect(seed=42, idle_secs=0)
+    w, h = 20, 8
+    effect.on_pty_update(make_pty_update(w, h, density=0.3, seed=42))
+    assert run_to_phase(effect, Phase.EARTH_TRANSITION, max_ticks=15000)
+
+    outputs = effect.tick()
+    cells = []
+    for out in outputs:
+        if isinstance(out, OutputCells):
+            cells.extend(out.cells)
+
+    pos_map: dict[tuple[int, int], Cell] = {}
+    for cell in cells:
+        pos_map[tuple(cell.coordinates)] = cell
+
+    for y in range(h):
+        for x in range(w):
+            pos = (x, y)
+            assert pos in pos_map, f"Position {pos} missing from EARTH_TRANSITION output"

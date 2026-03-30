@@ -384,3 +384,24 @@ def test_fading_alpha_decreases_grove():
         if found_dimmed or effect.phase == Phase.DONE:
             break
     assert found_dimmed, "No dimmed cells observed during FADING"
+
+
+def test_destructive_is_false():
+    """GroveEffect should be non-destructive (no black trails behind moving particles)."""
+    assert GroveEffect.destructive is False
+
+
+def test_all_cells_bg_none():
+    """All grove cells should have bg=None (overlays, not destructive)."""
+    effect = GroveEffect(seed=42, idle_secs=0)
+    effect.on_pty_update(make_pty_update(80, 24))
+    max_ticks = GROWING_DURATION + PERCHING_DURATION + 10
+    assert run_to_phase(effect, Phase.PERCHING, max_ticks=max_ticks)
+    # Check several frames during PERCHING (birds/fireflies are active)
+    for _ in range(10):
+        outputs = effect.tick()
+        for out in outputs:
+            for cell in out.cells:
+                assert cell.bg is None, (
+                    f"Grove cell at {cell.coordinates} has bg={cell.bg}, expected None"
+                )

@@ -265,6 +265,7 @@ class _Tree:
     trunk_offsets: list[int] = field(default_factory=list)
     canopy_noise: list[float] = field(default_factory=list)
     canopy_cx: int = 0
+    canopy_cache: list[tuple[int, int, str]] | None = None  # cached (x, y, char) for full canopy
 
 
 @dataclass(slots=True)
@@ -391,6 +392,7 @@ class _Butterfly:
 
 class GroveEffect:
     EFFECT_META = {"name": "grove", "description": "A vibrant grove grows from the terminal bottom"}
+    destructive = False
 
     def __init__(self, seed: int | None = None, idle_secs: float | None = None) -> None:
         self._rng = random.Random(seed)
@@ -424,9 +426,8 @@ class GroveEffect:
             active=False, direction=1, wave_front_x=0.0, start_tick=0,
             next_gust_tick=self._rng.randint(WIND_GUST_INTERVAL_MIN, WIND_GUST_INTERVAL_MAX),
         )
-
-        # Ghost-cell erasure: track positions emitted last frame
-        self._prev_render_positions: set[tuple[int, int]] = set()
+        # Static vegetation cache: built once when entering PERCHING
+        self._static_cells: dict[tuple[int, int], Cell] | None = None
 
 
     # -- Protocol callbacks --------------------------------------------------
@@ -468,7 +469,6 @@ class GroveEffect:
         )
         self._phase_start = 0
         self._fade_start_tick = -1
-        self._prev_render_positions = set()
 
     def _pick_delay(self) -> int:
         return round(self._rng.uniform(0.75, 1.25) * self._idle_secs * 30)
@@ -482,6 +482,10 @@ class GroveEffect:
     def _handle_resize(self, new_w: int, new_h: int) -> None:
         self._width = new_w
         self._height = new_h
+        # Invalidate caches on resize
+        for tree in self._trees:
+            tree.canopy_cache = None
+        self._static_cells = None
         # Clamp all flora
         for g in self._grass:
             g.x = max(0, min(new_w - 1, g.x))
@@ -1180,12 +1184,9 @@ class GroveEffect:
     def _fade_color(self, c: Color, alpha: float) -> Color:
         return (c[0], c[1], c[2], c[3] * alpha)
 
-    def _render(self) -> list[OutputMessage]:
-        buf: dict[tuple[int, int], Cell] = {}
-        fade_alpha = self._get_fade_alpha()
-        w = self._width
-        h = self._height
-
+    def _render_static_vegetation(self, buf: dict[tuple[int, int], Cell],
+                                   w: int, h: int, fade_alpha: float) -> None:
+        """Render all static vegetation (grass stems, mushrooms, flowers, vines) into buf."""
         def add_cell(x: int, y: int, ch: str, color: Color) -> None:
             if not (0 <= x < w and 0 <= y < h):
                 return
@@ -1193,7 +1194,7 @@ class GroveEffect:
             c = self._fade_color(color, fade_alpha) if fade_alpha < 1.0 else color
             buf[pos] = Cell(character=ch, coordinates=pos, fg=c, bg=None)
 
-        # Grass (wind shifts the top character)
+        # Grass (wind shifts the top character — only stems are static)
         for g in self._grass:
             for i in range(g.current_h):
                 gy = g.base_y - i
@@ -1229,64 +1230,32 @@ class GroveEffect:
                     px, py = v.path[i]
                     add_cell(px, py, v.cell_chars[i], v.color)
 
-        # Trees
+    def _build_static_cache(self) -> dict[tuple[int, int], Cell]:
+        """Build and return the static vegetation cache (fade_alpha=1.0)."""
+        buf: dict[tuple[int, int], Cell] = {}
+        self._render_static_vegetation(buf, self._width, self._height, 1.0)
+        # Trees (trunks + canopies)
+        w, h = self._width, self._height
         for tree in self._trees:
-            # Trunk (multi-width with bark texture, curvy offsets)
             half_w = tree.trunk_width // 2
             for i in range(tree.trunk_current):
                 ty = tree.base_y - i
                 trunk_off = tree.trunk_offsets[i] if i < len(tree.trunk_offsets) else 0
                 for dx in range(-half_w, half_w + 1):
                     tx = tree.x + trunk_off + dx
+                    if not (0 <= tx < w and 0 <= ty < h):
+                        continue
+                    pos = (tx, ty)
                     if dx == 0:
-                        add_cell(tx, ty, TRUNK_CHAR, tree.trunk_color)
+                        buf[pos] = Cell(character=TRUNK_CHAR, coordinates=pos, fg=tree.trunk_color, bg=None)
                     else:
-                        # Bark texture for side columns
                         ch_idx = (tx * 13 + ty * 7) % len(BARK_CHARS)
-                        add_cell(tx, ty, BARK_CHARS[ch_idx], tree.trunk_color)
-            # Canopy (amorphous shape via per-tree angular noise)
-            if tree.canopy_r_current > 0:
-                ccx = tree.canopy_cx
-                center_y = tree.branch_y
-                r = tree.canopy_r_current
-                ry = max(1, int(r * 0.7))
-                n_sectors = len(tree.canopy_noise)
-                for cy in range(center_y - ry, center_y + ry + 1):
-                    for cx in range(ccx - r, ccx + r + 1):
-                        if not (0 <= cx < w and 0 <= cy < h):
-                            continue
-                        dx_f = (cx - ccx) / max(1, r)
-                        dy_f = (cy - center_y) / max(1, ry)
-                        dist_sq = dx_f * dx_f + dy_f * dy_f
-                        # Angle-based noise modulates effective radius
-                        if n_sectors > 0:
-                            angle = math.atan2(dy_f, dx_f)
-                            sector = (angle + math.pi) / (2 * math.pi) * n_sectors
-                            s0 = int(sector) % n_sectors
-                            s1 = (s0 + 1) % n_sectors
-                            frac = sector - int(sector)
-                            noise = tree.canopy_noise[s0] * (1 - frac) + tree.canopy_noise[s1] * frac
-                        else:
-                            noise = 1.0
-                        threshold = noise * noise
-                        if dist_sq <= threshold:
-                            ch_idx = (cx + cy * 31) % len(CANOPY_CHARS)
-                            add_cell(cx, cy, CANOPY_CHARS[ch_idx], tree.canopy_color)
-                        elif dist_sq <= threshold * 1.15:
-                            # Organic edge fringe
-                            if ((cx * 17 + cy * 23) % 100) < 50:
-                                ch_idx = (cx + cy * 31) % len(CANOPY_CHARS)
-                                add_cell(cx, cy, CANOPY_CHARS[ch_idx], tree.canopy_color)
-
-        # Falling leaves
-        for lf in self._leaves:
-            if not lf.alive:
-                continue
-            if lf.state == "canopy":
-                add_cell(lf.spawn_x, lf.spawn_y, CANOPY_CHARS[lf.char_idx], lf.color)
-            else:
-                add_cell(lf.draw_x, lf.draw_y, CANOPY_CHARS[lf.char_idx], lf.color)
-
+                        buf[pos] = Cell(character=BARK_CHARS[ch_idx], coordinates=pos, fg=tree.trunk_color, bg=None)
+            if tree.canopy_r_current > 0 and tree.canopy_cache is not None:
+                for cx, cy, ch in tree.canopy_cache:
+                    if 0 <= cx < w and 0 <= cy < h:
+                        pos = (cx, cy)
+                        buf[pos] = Cell(character=ch, coordinates=pos, fg=tree.canopy_color, bg=None)
         # Bushes
         for bush in self._bushes:
             if bush.w_current <= 0 or bush.h_current <= 0:
@@ -1303,7 +1272,127 @@ class GroveEffect:
                     norm_y = dy / max(1, hh)
                     if norm_x + norm_y <= 1.2:
                         ch_idx = (bx + by * 7) % len(BUSH_CHARS)
-                        add_cell(bx, by, BUSH_CHARS[ch_idx], bush.color)
+                        pos = (bx, by)
+                        buf[pos] = Cell(character=BUSH_CHARS[ch_idx], coordinates=pos, fg=bush.color, bg=None)
+        # Attached flowers
+        for f in self._attached_flowers:
+            head_y = f.base_y
+            if f.bloom_stage == 1:
+                pos = (f.x, head_y)
+                if 0 <= f.x < w and 0 <= head_y < h:
+                    buf[pos] = Cell(character=FLOWER_BUD, coordinates=pos, fg=f.color, bg=None)
+            elif f.bloom_stage == 2 and f.pattern is not None:
+                for pdx, pdy, pch in f.pattern:
+                    px, py = f.x + pdx, head_y + pdy
+                    if 0 <= px < w and 0 <= py < h:
+                        pos = (px, py)
+                        buf[pos] = Cell(character=pch, coordinates=pos, fg=f.color, bg=None)
+        return buf
+
+    def _render(self) -> list[OutputMessage]:
+        buf: dict[tuple[int, int], Cell] = {}
+        fade_alpha = self._get_fade_alpha()
+        w = self._width
+        h = self._height
+
+        def add_cell(x: int, y: int, ch: str, color: Color) -> None:
+            if not (0 <= x < w and 0 <= y < h):
+                return
+            pos = (x, y)
+            c = self._fade_color(color, fade_alpha) if fade_alpha < 1.0 else color
+            buf[pos] = Cell(character=ch, coordinates=pos, fg=c, bg=None)
+
+        # Use static cache during PERCHING (fade_alpha==1.0)
+        if self._phase == Phase.PERCHING and self._static_cells is not None:
+            buf.update(self._static_cells)
+        else:
+            # Full render of static vegetation
+            self._render_static_vegetation(buf, w, h, fade_alpha)
+
+        # Trees, bushes, attached flowers — skip if using static cache
+        _use_static = self._phase == Phase.PERCHING and self._static_cells is not None
+        if not _use_static:
+            for tree in self._trees:
+                # Trunk (multi-width with bark texture, curvy offsets)
+                half_w = tree.trunk_width // 2
+                for i in range(tree.trunk_current):
+                    ty = tree.base_y - i
+                    trunk_off = tree.trunk_offsets[i] if i < len(tree.trunk_offsets) else 0
+                    for dx in range(-half_w, half_w + 1):
+                        tx = tree.x + trunk_off + dx
+                        if dx == 0:
+                            add_cell(tx, ty, TRUNK_CHAR, tree.trunk_color)
+                        else:
+                            ch_idx = (tx * 13 + ty * 7) % len(BARK_CHARS)
+                            add_cell(tx, ty, BARK_CHARS[ch_idx], tree.trunk_color)
+                # Canopy (amorphous shape via per-tree angular noise)
+                if tree.canopy_r_current > 0:
+                    if tree.canopy_cache is not None and tree.canopy_r_current == tree.canopy_r_target:
+                        for cx, cy, ch in tree.canopy_cache:
+                            if 0 <= cx < w and 0 <= cy < h:
+                                add_cell(cx, cy, ch, tree.canopy_color)
+                    else:
+                        ccx = tree.canopy_cx
+                        center_y = tree.branch_y
+                        r = tree.canopy_r_current
+                        ry = max(1, int(r * 0.7))
+                        n_sectors = len(tree.canopy_noise)
+                        canopy_cells: list[tuple[int, int, str]] = []
+                        for cy in range(center_y - ry, center_y + ry + 1):
+                            for cx in range(ccx - r, ccx + r + 1):
+                                if not (0 <= cx < w and 0 <= cy < h):
+                                    continue
+                                dx_f = (cx - ccx) / max(1, r)
+                                dy_f = (cy - center_y) / max(1, ry)
+                                dist_sq = dx_f * dx_f + dy_f * dy_f
+                                if n_sectors > 0:
+                                    angle = math.atan2(dy_f, dx_f)
+                                    sector = (angle + math.pi) / (2 * math.pi) * n_sectors
+                                    s0 = int(sector) % n_sectors
+                                    s1 = (s0 + 1) % n_sectors
+                                    frac = sector - int(sector)
+                                    noise = tree.canopy_noise[s0] * (1 - frac) + tree.canopy_noise[s1] * frac
+                                else:
+                                    noise = 1.0
+                                threshold = noise * noise
+                                if dist_sq <= threshold:
+                                    ch_idx = (cx + cy * 31) % len(CANOPY_CHARS)
+                                    canopy_cells.append((cx, cy, CANOPY_CHARS[ch_idx]))
+                                    add_cell(cx, cy, CANOPY_CHARS[ch_idx], tree.canopy_color)
+                                elif dist_sq <= threshold * 1.15:
+                                    if ((cx * 17 + cy * 23) % 100) < 50:
+                                        ch_idx = (cx + cy * 31) % len(CANOPY_CHARS)
+                                        canopy_cells.append((cx, cy, CANOPY_CHARS[ch_idx]))
+                                        add_cell(cx, cy, CANOPY_CHARS[ch_idx], tree.canopy_color)
+                        if tree.canopy_r_current == tree.canopy_r_target:
+                            tree.canopy_cache = canopy_cells
+
+            # Bushes
+            for bush in self._bushes:
+                if bush.w_current <= 0 or bush.h_current <= 0:
+                    continue
+                wh = bush.w_current
+                hh = bush.h_current
+                for dy in range(hh):
+                    for dx in range(-wh, wh + 1):
+                        bx = bush.cx + dx
+                        by = bush.base_y - dy
+                        if not (0 <= bx < w and 0 <= by < h):
+                            continue
+                        norm_x = abs(dx) / max(1, wh)
+                        norm_y = dy / max(1, hh)
+                        if norm_x + norm_y <= 1.2:
+                            ch_idx = (bx + by * 7) % len(BUSH_CHARS)
+                            add_cell(bx, by, BUSH_CHARS[ch_idx], bush.color)
+
+        # Falling leaves
+        for lf in self._leaves:
+            if not lf.alive:
+                continue
+            if lf.state == "canopy":
+                add_cell(lf.spawn_x, lf.spawn_y, CANOPY_CHARS[lf.char_idx], lf.color)
+            else:
+                add_cell(lf.draw_x, lf.draw_y, CANOPY_CHARS[lf.char_idx], lf.color)
 
         # Critters (climb tree trunks)
         for c in self._critters:
@@ -1321,13 +1410,14 @@ class GroveEffect:
                 add_cell(cx, cy + j, ch, c.color)
 
         # Attached flowers (vine/canopy — render on top of trees/vines)
-        for f in self._attached_flowers:
-            head_y = f.base_y
-            if f.bloom_stage == 1:
-                add_cell(f.x, head_y, FLOWER_BUD, f.color)
-            elif f.bloom_stage == 2 and f.pattern is not None:
-                for dx, dy, ch in f.pattern:
-                    add_cell(f.x + dx, head_y + dy, ch, f.color)
+        if not _use_static:
+            for f in self._attached_flowers:
+                head_y = f.base_y
+                if f.bloom_stage == 1:
+                    add_cell(f.x, head_y, FLOWER_BUD, f.color)
+                elif f.bloom_stage == 2 and f.pattern is not None:
+                    for dx, dy, ch in f.pattern:
+                        add_cell(f.x + dx, head_y + dy, ch, f.color)
 
         # Birds (render in front of trees/canopy)
         for bird in self._birds:
@@ -1373,17 +1463,7 @@ class GroveEffect:
                 if ff.alive and ff_ph_t >= ff.spawn_delay:
                     add_cell(round(ff.fx), round(ff.fy), ff.char, ff.color)
 
-        # Erase ghost cells (positions rendered last frame that aren't rendered this frame)
-        current_positions = set(buf.keys())
-        erasers = {
-            pos: Cell(character=" ", coordinates=pos, fg=None, bg=None)
-            for pos in self._prev_render_positions - current_positions
-            if 0 <= pos[0] < w and 0 <= pos[1] < h
-        }
-        self._prev_render_positions = current_positions
-        # Erasers go first, then scene cells (erasers don't override scene)
-        erasers.update(buf)
-        all_cells = list(erasers.values())
+        all_cells = list(buf.values())
         if not all_cells:
             return []
         return [OutputCells(cells=all_cells)]
@@ -1396,6 +1476,7 @@ class GroveEffect:
             if t - self._phase_start >= GROWING_DURATION:
                 self._phase = Phase.PERCHING
                 self._phase_start = t
+                self._static_cells = self._build_static_cache()
         elif self._phase == Phase.PERCHING:
             if t - self._phase_start >= PERCHING_DURATION:
                 self._phase = Phase.FADING

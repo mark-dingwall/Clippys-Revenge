@@ -256,7 +256,11 @@ def test_alien_cells_in_top_zone():
         for out in effect.tick():
             for cell in out.cells:
                 fg = cell.fg
-                if fg is not None and _is_approx_any_alien_color(fg):
+                # Exclude explosion/kill cells ("*") — kill fireballs can
+                # extend into the code zone with darkened green colors.
+                if (fg is not None
+                        and cell.character != "*"
+                        and _is_approx_any_alien_color(fg)):
                     x, y = cell.coordinates
                     assert y < code_zone_start, (
                         f"Alien cell at y={y} >= code_zone_start={code_zone_start}"
@@ -265,8 +269,8 @@ def test_alien_cells_in_top_zone():
             break
 
 
-def test_fading_alpha_decreases():
-    """Once FADING, cells have alpha < 1.0; eventually transitions to DONE."""
+def test_fading_colors_darken():
+    """Once FADING, cell colors darken toward black; eventually transitions to DONE."""
     effect = InvadersEffect(seed=0, idle_secs=0)
     effect.on_pty_update(make_pty_update(20, 8))
 
@@ -274,17 +278,19 @@ def test_fading_alpha_decreases():
     reached_fading = run_to_phase(effect, Phase.FADING, max_ticks=3000)
     assert reached_fading, "Never reached FADING"
 
-    # Check that some cell has alpha < 1.0 during FADING
+    # Check that some cell has darkened fg (RGB below source color values)
     found_dimmed = False
     for _ in range(FADE_DURATION + 5):
         for out in effect.tick():
             for cell in out.cells:
-                if cell.fg is not None and cell.fg[3] < 1.0:
-                    found_dimmed = True
+                if cell.fg is not None:
+                    r, g, b, _a = cell.fg
+                    if max(r, g, b) > 0.0 and max(r, g, b) < 0.35:
+                        found_dimmed = True
         if effect.phase == Phase.DONE:
             break
 
-    assert found_dimmed, "No dimmed cells observed during FADING"
+    assert found_dimmed, "No darkened cells observed during FADING"
     assert effect.phase == Phase.DONE, f"Expected DONE, got {effect.phase.name}"
 
 
@@ -585,3 +591,38 @@ def test_is_done_property():
     effect.on_pty_update(make_pty_update(20, 8))
     run_to_phase(effect, Phase.DONE, max_ticks=3000)
     assert effect.is_done
+
+
+def test_destructive_is_false():
+    """InvadersEffect should be non-destructive (overlays don't mark _touched)."""
+    assert InvadersEffect.destructive is False
+
+
+def test_top_zone_fades_in_after_bombardment():
+    """Top zone bg fades from transparent to opaque black after bombardment."""
+    from clippy.effects.invaders import BOMBARDMENT_DURATION, TOP_FADE_DURATION
+    effect = InvadersEffect(seed=42, idle_secs=0)
+    effect.on_pty_update(make_pty_update(40, 12))
+    run_to_phase(effect, Phase.BOMBARDMENT, max_ticks=10)
+    run_to_phase(effect, Phase.ACTIVE, max_ticks=BOMBARDMENT_DURATION + 10)
+    assert effect.phase == Phase.ACTIVE
+
+    # Early in ACTIVE: top zone bg should be semi-transparent (fading in)
+    outputs = effect.tick()
+    cells = []
+    for out in outputs:
+        if isinstance(out, OutputCells):
+            cells.extend(out.cells)
+    top_zone_h = effect._top_zone_height
+    early_bgs = [c.bg for c in cells if c.coordinates[1] < top_zone_h and c.bg is not None]
+    assert any(bg[3] < 1.0 for bg in early_bgs), "Expected semi-transparent bg early in fade"
+
+    # After TOP_FADE_DURATION: top zone bg should be fully opaque
+    advance(effect, TOP_FADE_DURATION + 5)
+    outputs = effect.tick()
+    cells = []
+    for out in outputs:
+        if isinstance(out, OutputCells):
+            cells.extend(out.cells)
+    late_bgs = [c.bg for c in cells if c.coordinates[1] < top_zone_h and c.bg is not None]
+    assert all(bg[3] == 1.0 for bg in late_bgs), "Expected fully opaque bg after fade completes"

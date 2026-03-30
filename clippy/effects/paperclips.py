@@ -318,9 +318,9 @@ class PaperclipsEffect:
         # Counter zone positions (reserved from clip placement)
         self._counter_positions: set[tuple[int, int]] = set()
         self._counter_text = ""
-
-        # Ghost-cell erasure
-        self._prev_render_positions: set[tuple[int, int]] = set()
+        # Cached space background cells for earth phases
+        self._space_bg_cache: list[Cell] | None = None
+        self._space_bg_size: tuple[int, int] = (0, 0)
 
     # -- Protocol callbacks ---------------------------------------------------
 
@@ -396,9 +396,6 @@ class PaperclipsEffect:
 
         # Rebuild counter positions
         self._rebuild_counter_positions()
-
-        # Reset ghost tracking
-        self._prev_render_positions = set()
 
     # -- Scheduling -----------------------------------------------------------
 
@@ -502,7 +499,6 @@ class PaperclipsEffect:
         self._growth_budget = 0.0
         self._counter_positions = set()
         self._counter_text = ""
-        self._prev_render_positions = set()
         self._fade_start_tick = 0
         self._wave_origin = (0.0, 0.0)
         self._wave_radius = 0.0
@@ -633,7 +629,12 @@ class PaperclipsEffect:
         return max(0.0, 1.0 - (self._tick_count - self._fade_start_tick) / FADE_DURATION)
 
     def _tint(self, color: Color, alpha: float) -> Color:
-        return (color[0], color[1], color[2], color[3] * alpha)
+        """Darken a color toward black while preserving alpha.
+
+        This keeps the cell fully opaque so tattoy doesn't blend it with
+        the live terminal content underneath the overlay.
+        """
+        return (color[0] * alpha, color[1] * alpha, color[2] * alpha, color[3])
 
     # -- Growth algorithm -----------------------------------------------------
 
@@ -733,8 +734,20 @@ class PaperclipsEffect:
 
     def _render(self) -> list[OutputMessage]:
         cells: list[Cell] = []
-        current_positions: set[tuple[int, int]] = set()
         alpha = self._fade_alpha()
+
+        # Space background — full-screen opaque black so terminal content
+        # doesn't bleed through during earth scenes and fade-out.
+        if self._phase in (Phase.EARTH_TRANSITION, Phase.EARTH_REPLICATING, Phase.FADING):
+            cur_size = (self._width, self._height)
+            if self._space_bg_cache is None or self._space_bg_size != cur_size:
+                space_bg: Color = (0.0, 0.0, 0.0, 1.0)
+                self._space_bg_cache = [
+                    Cell(character=" ", coordinates=(x, y), fg=None, bg=space_bg)
+                    for y in range(self._height) for x in range(self._width)
+                ]
+                self._space_bg_size = cur_size
+            cells.extend(self._space_bg_cache)
 
         # 0. Stars (earth background)
         if self._phase in (Phase.EARTH_TRANSITION, Phase.EARTH_REPLICATING, Phase.FADING):
@@ -742,7 +755,6 @@ class PaperclipsEffect:
                 if pos not in self._clip_cells and pos not in self._flash_cells:
                     fg = self._tint(color, alpha)
                     cells.append(Cell(character=ch, coordinates=pos, fg=fg, bg=None))
-                    current_positions.add(pos)
 
         # 1. Earth art cells (unconsumed, during earth phases)
         if self._phase in (Phase.EARTH_TRANSITION, Phase.EARTH_REPLICATING):
@@ -750,7 +762,6 @@ class PaperclipsEffect:
                 if pos not in self._clip_cells and pos not in self._flash_cells:
                     fg = self._tint(color, alpha)
                     cells.append(Cell(character=ch, coordinates=pos, fg=fg, bg=None))
-                    current_positions.add(pos)
 
         # 2. Clip cells (skip positions with active flashes)
         for pos, cc in self._clip_cells.items():
@@ -758,7 +769,6 @@ class PaperclipsEffect:
                 continue
             fg = self._tint(cc.color, alpha)
             cells.append(Cell(character=cc.ch, coordinates=pos, fg=fg, bg=None))
-            current_positions.add(pos)
 
         # 3. Flash cells
         for pos, fi in self._flash_cells.items():
@@ -767,7 +777,6 @@ class PaperclipsEffect:
                 flash_color = FLASH_COLORS[stage]
                 fg = self._tint(flash_color, alpha)
                 cells.append(Cell(character=fi.ch, coordinates=pos, fg=fg, bg=None))
-                current_positions.add(pos)
 
         # 4. Counter cells
         if self._phase in (Phase.REPLICATING, Phase.FILLING,
@@ -784,16 +793,8 @@ class PaperclipsEffect:
                         fg = self._tint(COUNTER_FG, alpha)
                         bg = self._tint(COUNTER_BG, alpha)
                         cells.append(Cell(character=ch, coordinates=pos, fg=fg, bg=bg))
-                        current_positions.add(pos)
-
-        # 5. Ghost erasure
-        erasers = [
-            Cell(character=" ", coordinates=pos, fg=None, bg=None)
-            for pos in self._prev_render_positions - current_positions
-        ]
-        self._prev_render_positions = current_positions
-
-        return [OutputCells(cells=erasers + cells)]
+    
+        return [OutputCells(cells=cells)]
 
     # -- Main tick ------------------------------------------------------------
 

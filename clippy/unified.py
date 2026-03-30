@@ -8,7 +8,9 @@ from enum import IntEnum
 from clippy.harness import Effect
 from clippy.mascot_render import (
     BLINK_DURATION,
+    BLINK_PERIOD,
     CACKLE_FLIP_TICKS,
+    EYE_PULSE_PERIOD,
     FACE_H,
     FACE_W,
     MARGIN,
@@ -24,6 +26,7 @@ from clippy.types import (
 )
 
 FPS = 30
+_DESTROYED_BG: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 1.0)
 
 
 # ---------------------------------------------------------------------------
@@ -79,6 +82,17 @@ class UnifiedEffect:
 
         # Last PTYUpdate for forwarding to inner effect on creation
         self._last_pty_update: PTYUpdate | None = None
+        # Background buffer: snapshot of terminal content at ACTIVE start
+        self._bg_buffer: dict[tuple[int, int], Cell] = {}
+        # Positions the effect has ever touched (destroyed — stay blank)
+        self._touched: set[tuple[int, int]] = set()
+        # Mascot render cache: (cache_key) → list[Cell]
+        self._mascot_cache_key: tuple | None = None
+        self._mascot_cache: list[Cell] = []
+        # Persistent frame for delta updates during ACTIVE
+        self._frame: dict[tuple[int, int], Cell] = {}
+        self._prev_effect_pos: set[tuple[int, int]] = set()
+        self._prev_mascot_pos: set[tuple[int, int]] = set()
 
         # Timing
         self._imminent_early_start = 0
@@ -104,8 +118,14 @@ class UnifiedEffect:
 
     # -- Protocol callbacks -----------------------------------------------
 
+    def _invalidate_on_resize(self) -> None:
+        self._mascot_cache_key = None
+
     def on_pty_update(self, update: PTYUpdate) -> None:
+        old_size = (self._width, self._height)
         self._width, self._height = update.size
+        if update.size != old_size:
+            self._invalidate_on_resize()
         self._last_pty_update = update
 
         # Forward to inner effect during ACTIVE
@@ -132,7 +152,10 @@ class UnifiedEffect:
                 self._start_inner_effect()
 
     def on_resize(self, resize: TTYResize) -> None:
+        old_size = (self._width, self._height)
         self._width, self._height = resize.width, resize.height
+        if (resize.width, resize.height) != old_size:
+            self._invalidate_on_resize()
         if self._inner is not None and self._phase == UnifiedPhase.ACTIVE:
             self._inner.on_resize(resize)
         if not self._received_first_update:
@@ -153,6 +176,11 @@ class UnifiedEffect:
         if self._phase != UnifiedPhase.DONE:
             self._phase = UnifiedPhase.DONE
             self._inner = None
+            self._bg_buffer = {}
+            self._touched = set()
+            self._frame = {}
+            self._prev_effect_pos = set()
+            self._prev_mascot_pos = set()
 
     @property
     def is_done(self) -> bool:
@@ -184,6 +212,8 @@ class UnifiedEffect:
 
     def _start_inner_effect(self) -> None:
         self._phase = UnifiedPhase.ACTIVE
+        self._capture_background()
+        self._init_persistent_frame()
         inner_seed = self._rng.randrange(2**32)
         effect_class = self._next_effect_class()
         self._last_played = effect_class
@@ -196,65 +226,116 @@ class UnifiedEffect:
     def _start_cackling(self) -> None:
         self._phase = UnifiedPhase.CACKLING
         self._inner = None
+        self._bg_buffer = {}
+        self._touched = set()
+        self._frame = {}
+        self._prev_effect_pos = set()
+        self._prev_mascot_pos = set()
         self._cackle_start = self._tick_count
         self._cackle_end = self._tick_count + round(5 * FPS)
 
-    # -- Mascot rendering -------------------------------------------------
+    # -- Compositing ------------------------------------------------------
 
-    def _merge_mascot(self, inner_outputs: list[OutputMessage]) -> list[OutputMessage]:
-        """Flatten mascot on top of the inner effect's output.
+    def _capture_background(self) -> None:
+        """Snapshot the terminal content as the background buffer."""
+        self._bg_buffer = {}
+        if self._last_pty_update is not None:
+            for cell in self._last_pty_update.cells:
+                self._bg_buffer[tuple(cell.coordinates)] = cell
+        self._touched = set()
 
-        At overlapping positions, the mascot's character and fg win (so the
-        mascot is visible), but the effect's bg is preserved (so the effect's
-        destruction of the terminal content remains visible behind the mascot
-        wireframe).  This prevents flicker while keeping the effect's coverage.
+    def _overlay(self, base: dict[tuple[int, int], Cell], top: list[Cell]) -> None:
+        """Layer top cells onto base dict, inheriting bg when top has bg=None."""
+        for cell in top:
+            pos = tuple(cell.coordinates)
+            if cell.bg is not None:
+                base[pos] = cell
+            else:
+                under = base.get(pos)
+                bg = under.bg if under is not None else None
+                if bg is None:
+                    bg_cell = self._bg_buffer.get(pos)
+                    if bg_cell is not None:
+                        bg = bg_cell.bg
+                base[pos] = Cell(
+                    character=cell.character,
+                    coordinates=cell.coordinates,
+                    fg=cell.fg,
+                    bg=bg,
+                )
 
-        If the inner effect emits OutputCells, the mascot is merged into the
-        last OutputCells message (tattoy replaces the layer per message type,
-        so a separate OutputCells would overwrite the effect). If the inner
-        effect uses OutputPixels (e.g. microbes), the mascot goes as a
-        separate OutputCells since they're distinct message types.
-        """
-        mascot_msgs = self._render_mascot()
-        if not mascot_msgs:
+    def _base_cell(self, pos: tuple[int, int]) -> Cell | None:
+        """Return the base cell for a position (touched → destroyed, else None/transparent)."""
+        if pos in self._touched:
+            return Cell(character=" ", coordinates=pos, fg=None, bg=_DESTROYED_BG)
+        return None  # Transparent — PTY shows through
+
+    def _init_persistent_frame(self) -> None:
+        """Build the initial persistent frame at ACTIVE start."""
+        self._frame = {}  # Empty — only touched/effect/mascot positions added
+        self._prev_effect_pos = set()
+        self._prev_mascot_pos = set()
+
+    def _composite(self, inner_outputs: list[OutputMessage]) -> list[OutputMessage]:
+        """Delta-based compositing: restore previous positions, apply new ones."""
+        w, h = self._width, self._height
+        if w <= 0 or h <= 0:
             return inner_outputs
 
-        mascot_msg = mascot_msgs[0]
-        assert isinstance(mascot_msg, OutputCells)
-        mascot_cells = mascot_msg.cells
+        frame = self._frame
 
-        # Find the last OutputCells in inner_outputs to merge into
-        for i in range(len(inner_outputs) - 1, -1, -1):
-            msg = inner_outputs[i]
+        # Restore previous mascot positions to base
+        for pos in self._prev_mascot_pos:
+            base = self._base_cell(pos)
+            if base is not None:
+                frame[pos] = base
+            else:
+                frame.pop(pos, None)  # Remove → transparent
+
+        # Restore previous effect positions to base
+        for pos in self._prev_effect_pos:
+            base = self._base_cell(pos)
+            if base is not None:
+                frame[pos] = base
+            else:
+                frame.pop(pos, None)
+
+        # Extract effect cells from inner outputs
+        passthrough: list[OutputMessage] = []
+        effect_cells: list[Cell] = []
+        for msg in inner_outputs:
             if isinstance(msg, OutputCells):
-                # Build lookup: position -> effect cell
-                effect_by_pos = {tuple(c.coordinates): c for c in msg.cells}
-                mascot_by_pos = {tuple(c.coordinates): c for c in mascot_cells}
+                effect_cells = msg.cells
+            else:
+                passthrough.append(msg)
 
-                # Non-overlapping effect cells pass through unchanged
-                merged = [c for c in msg.cells
-                          if tuple(c.coordinates) not in mascot_by_pos]
+        # Apply touched mask for newly touched positions
+        destructive = getattr(self._inner, 'destructive', True)
+        cur_effect_pos: set[tuple[int, int]] = set()
+        for cell in effect_cells:
+            pos = tuple(cell.coordinates)
+            cur_effect_pos.add(pos)
+            if destructive or cell.bg is not None:
+                self._touched.add(pos)
 
-                # Overlapping positions: mascot char/fg, effect bg
-                for mc in mascot_cells:
-                    pos = tuple(mc.coordinates)
-                    ec = effect_by_pos.get(pos)
-                    if ec is not None and ec.bg is not None:
-                        merged.append(Cell(
-                            character=mc.character,
-                            coordinates=mc.coordinates,
-                            fg=mc.fg,
-                            bg=ec.bg,
-                        ))
-                    else:
-                        merged.append(mc)
+        # Overlay effect cells
+        self._overlay(frame, effect_cells)
 
-                inner_outputs[i] = OutputCells(cells=merged)
-                return inner_outputs
+        # Overlay mascot
+        cur_mascot_pos: set[tuple[int, int]] = set()
+        mascot_msgs = self._render_mascot()
+        if mascot_msgs:
+            mascot_msg = mascot_msgs[0]
+            assert isinstance(mascot_msg, OutputCells)
+            for cell in mascot_msg.cells:
+                cur_mascot_pos.add(tuple(cell.coordinates))
+            self._overlay(frame, mascot_msg.cells)
 
-        # No OutputCells in inner output (e.g. microbes uses OutputPixels) —
-        # emit mascot as a separate message (different wire type, no conflict)
-        return inner_outputs + mascot_msgs
+        self._prev_effect_pos = cur_effect_pos
+        self._prev_mascot_pos = cur_mascot_pos
+
+        cells = list(frame.values())
+        return passthrough + [OutputCells(cells=cells)] if cells else passthrough
 
     _PHASE_TO_STATE = {
         UnifiedPhase.WATCHING: "watching",
@@ -264,12 +345,28 @@ class UnifiedEffect:
         UnifiedPhase.CACKLING: "cackling",
     }
 
+    def _mascot_cache_key_for(self, state: str) -> tuple:
+        t = self._tick_count
+        if state == "watching":
+            blink = t % BLINK_PERIOD < BLINK_DURATION
+            return (state, blink, self._width, self._height)
+        elif state == "cackling":
+            frame = (t // CACKLE_FLIP_TICKS) % 2
+            return (state, frame, self._width, self._height)
+        else:
+            # imminent_early is static; imminent_deep/active pulse by period
+            pulse_phase = t % EYE_PULSE_PERIOD
+            return (state, pulse_phase, self._width, self._height)
+
     def _render_mascot(self) -> list[OutputMessage]:
         state = self._PHASE_TO_STATE.get(self._phase)
         if state is None:
             return []
-        cells = render_mascot(state, self._tick_count, self._width, self._height)
-        return [OutputCells(cells=cells)] if cells else []
+        key = self._mascot_cache_key_for(state)
+        if key != self._mascot_cache_key:
+            self._mascot_cache = render_mascot(state, self._tick_count, self._width, self._height)
+            self._mascot_cache_key = key
+        return [OutputCells(cells=self._mascot_cache)] if self._mascot_cache else []
 
     # -- Main tick --------------------------------------------------------
 
@@ -291,7 +388,7 @@ class UnifiedEffect:
                     self._phase = UnifiedPhase.DONE
                     return []
                 self._start_cackling()
-            return self._merge_mascot(inner_outputs)
+            return self._composite(inner_outputs)
 
         if self._phase == UnifiedPhase.CACKLING:
             if self._tick_count >= self._cackle_end:

@@ -392,21 +392,3 @@ def test_fading_alpha_decreases():
         if found_dimmed or effect.phase == Phase.DONE:
             break
     assert found_dimmed, "No dimmed cells observed during FADING"
-
-
-def test_ghost_cells_emitted():
-    """At least one ghost Cell(character=" ") appears after SWARMING starts."""
-    effect = MicrobesEffect(seed=42, idle_secs=0)
-    effect.on_pty_update(make_pty_update(80, 24))
-    effect.tick()  # start effect
-    assert effect.phase == Phase.SWARMING
-    found_ghost = False
-    for _ in range(SWARMING_DURATION + FADE_DURATION):
-        outputs = effect.tick()
-        for out in outputs:
-            for cell in out.cells:
-                if cell.character == " " and cell.fg is None and cell.bg is None:
-                    found_ghost = True
-        if found_ghost or effect.phase == Phase.DONE:
-            break
-    assert found_ghost, "No ghost cell (character=' ') observed"

@@ -196,6 +196,7 @@ class InvadersEffect:
         "name": "invaders",
         "description": "Alien invaders blast your code to rubble",
     }
+    destructive = False
 
     def __init__(self, seed: int | None = None, idle_secs: float | None = None) -> None:
         self._rng = random.Random(seed)
@@ -254,9 +255,8 @@ class InvadersEffect:
 
         # Active-phase duration cap
         self._active_start_tick = 0
-
-        # Ghost-cell erasure: track positions emitted last frame
-        self._prev_render_positions: set[tuple[int, int]] = set()
+        # Cached opaque black top zone cells (built once when top_alpha reaches 1.0)
+        self._top_zone_cache: list[Cell] | None = None
 
     # -- Zone geometry --------------------------------------------------------
 
@@ -312,6 +312,7 @@ class InvadersEffect:
 
     def _handle_resize(self, new_w: int, new_h: int) -> None:
         self._width, self._height = new_w, new_h
+        self._top_zone_cache = None
         self._compute_zones(new_w, new_h)
         new_num_lanes = self._num_lanes
 
@@ -339,9 +340,6 @@ class InvadersEffect:
             b for b in self._bombard_bombs
             if b.y < new_h
         ]
-
-        # Reset ghost-tracking positions — stale coords may be OOB after resize
-        self._prev_render_positions = set()
 
         # Prune OOB rubble, bombs, and flung chars
         self._bombard_rubble = {
@@ -395,7 +393,6 @@ class InvadersEffect:
         self._aliens = []
         self._lane_last_exit = []
         self._march_timer = 0
-        self._prev_render_positions = set()
         self._fade_start_tick = 0
         self._top_fade_start = 0
 
@@ -424,14 +421,24 @@ class InvadersEffect:
         return max(0.0, 1.0 - (self._tick_count - self._fade_start_tick) / FADE_DURATION)
 
     def _top_zone_alpha(self) -> float:
-        """Alpha for the top zone background — fades after bombardment ends."""
+        """Alpha for the top zone black bg — fades IN after bombardment ends.
+
+        Returns 0.0 during bombardment (terminal visible), then ramps
+        from 0→1 over TOP_FADE_DURATION ticks so the entire top zone
+        darkens to opaque black before aliens fly in.
+        """
         if self._phase == Phase.BOMBARDMENT:
-            return 1.0
+            return 0.0
         elapsed = self._tick_count - self._top_fade_start
-        return max(0.0, 1.0 - elapsed / TOP_FADE_DURATION)
+        return min(1.0, elapsed / TOP_FADE_DURATION)
 
     def _tint(self, color: Color, alpha: float) -> Color:
-        return (color[0], color[1], color[2], color[3] * alpha)
+        """Darken a color toward black while preserving alpha.
+
+        This keeps the cell fully opaque so tattoy doesn't blend it with
+        the live terminal content underneath the overlay.
+        """
+        return (color[0] * alpha, color[1] * alpha, color[2] * alpha, color[3])
 
     # -- Bombardment simulation -----------------------------------------------
 
@@ -622,13 +629,11 @@ class InvadersEffect:
 
     def _render_bombardment(self) -> list[OutputMessage]:
         cells: list[Cell] = []
-        current_positions: set[tuple[int, int]] = set()
 
-        # Accumulated bombardment rubble (no overlay — appears on top of live terminal)
+        # Bombardment rubble — overlay on live terminal (terminal text
+        # is visible between rubble, giving the effect of being bombed)
         for (rx, ry), ch in self._bombard_rubble.items():
-            pos = (rx, ry)
-            cells.append(Cell(character=ch, coordinates=pos, fg=RUBBLE_COLOR, bg=None))
-            current_positions.add(pos)
+            cells.append(Cell(character=ch, coordinates=(rx, ry), fg=RUBBLE_COLOR, bg=None))
 
         # Bombardment bombs
         for bomb in self._bombard_bombs:
@@ -639,9 +644,7 @@ class InvadersEffect:
                     ch = "\\"
                 else:
                     ch = "|"
-                pos = (bomb.x, bomb.y)
-                cells.append(Cell(character=ch, coordinates=pos, fg=BOMB_COLOR, bg=None))
-                current_positions.add(pos)
+                cells.append(Cell(character=ch, coordinates=(bomb.x, bomb.y), fg=BOMB_COLOR, bg=None))
 
         # Explosions (expire old ones)
         live_explosions: list[_Explosion] = []
@@ -651,9 +654,7 @@ class InvadersEffect:
                 continue
             live_explosions.append(exp)
             if 0 <= exp.x < self._width and 0 <= exp.y < self._height:
-                pos = (exp.x, exp.y)
-                cells.append(Cell(character="*", coordinates=pos, fg=EXPLOSION_COLOR, bg=None))
-                current_positions.add(pos)
+                cells.append(Cell(character="*", coordinates=(exp.x, exp.y), fg=EXPLOSION_COLOR, bg=None))
         self._explosions = live_explosions
 
         # Flung text debris
@@ -666,35 +667,29 @@ class InvadersEffect:
             f.y += f.dy
             live_flung.append(f)
             if 0 <= f.x < self._width and 0 <= f.y < self._height:
-                pos = (f.x, f.y)
-                cells.append(Cell(character=f.ch, coordinates=pos, fg=FLUNG_COLOR, bg=None))
-                current_positions.add(pos)
+                cells.append(Cell(character=f.ch, coordinates=(f.x, f.y), fg=FLUNG_COLOR, bg=None))
         self._flung = live_flung
 
-        # Erase ghost cells (positions rendered last frame that aren't rendered this frame)
-        erasers = [
-            Cell(character=" ", coordinates=pos, fg=None, bg=None)
-            for pos in self._prev_render_positions - current_positions
-        ]
-        self._prev_render_positions = current_positions
-
-        return [OutputCells(cells=erasers + cells)]
+        return [OutputCells(cells=cells)]
 
     def _render_active(self) -> list[OutputMessage]:
         cells: list[Cell] = []
-        current_positions: set[tuple[int, int]] = set()
         alpha = self._fade_alpha()
         top_alpha = self._top_zone_alpha()
 
         def add(cell: Cell) -> None:
             cells.append(cell)
-            current_positions.add(cell.coordinates)
 
-        # 1. Bombardment rubble fading out — cover the entire top zone so live IDE
-        #    content doesn't bleed through positions that were never rubbled.
-        if top_alpha > 0.0:
-            bg_col = self._tint(BLANK_BG, top_alpha * alpha)
-            rubble_fg = self._tint(RUBBLE_COLOR, top_alpha * alpha)
+        # 1. Top zone fade-in: after bombardment, gradually darken the entire
+        #    top zone to opaque black so aliens have a clean area to fly in.
+        #    top_alpha ramps 0→1: at 0 the terminal is fully visible, at 1
+        #    it's completely hidden behind opaque black.
+        if top_alpha < 1.0:
+            # Still fading — cover entire top zone with increasingly opaque bg
+            # while bombardment rubble darkens and disappears.
+            bg_col: Color = (0.0, 0.0, 0.0, top_alpha)
+            fade_factor = 1.0 - top_alpha
+            rubble_fg = self._tint(RUBBLE_COLOR, fade_factor * alpha)
             for ty in range(self._top_zone_height):
                 for tx in range(self._width):
                     pos = (tx, ty)
@@ -703,12 +698,24 @@ class InvadersEffect:
                                  coordinates=pos, fg=rubble_fg, bg=bg_col))
                     else:
                         add(Cell(character=" ", coordinates=pos, fg=None, bg=bg_col))
-            # Also render bombard rubble that landed below the top zone
+            # Bombardment rubble below top zone also darkens
             for (rx, ry), ch in self._bombard_rubble.items():
                 if ry >= self._top_zone_height:
-                    add(Cell(character=ch, coordinates=(rx, ry), fg=rubble_fg, bg=None))
-        else:
-            self._bombard_rubble = {}  # fully faded — free memory; ghost tracking erases this frame
+                    add(Cell(character=ch, coordinates=(rx, ry),
+                             fg=rubble_fg, bg=(0.0, 0.0, 0.0, top_alpha)))
+        elif self._bombard_rubble:
+            # Fade complete — fully opaque black, clear bombardment rubble
+            _OPAQUE_BLACK: Color = (0.0, 0.0, 0.0, 1.0)
+            self._top_zone_cache = [
+                Cell(character=" ", coordinates=(tx, ty), fg=None, bg=_OPAQUE_BLACK)
+                for ty in range(self._top_zone_height)
+                for tx in range(self._width)
+            ]
+            cells.extend(self._top_zone_cache)
+            self._bombard_rubble = {}
+        elif self._top_zone_cache is not None:
+            # Reuse cached opaque black top zone
+            cells.extend(self._top_zone_cache)
 
         # 2. Aliens
         for alien in self._aliens:
@@ -745,10 +752,11 @@ class InvadersEffect:
                 add(Cell(character="*", coordinates=(exp.x, exp.y), fg=explosion_fg, bg=None))
         self._explosions = live_explosions
 
-        # 5. Rubble (static — always emitted at same positions, no ghost issues)
+        # 5. Rubble (static — always emitted at same positions)
+        _OPAQUE_BLACK: Color = (0.0, 0.0, 0.0, 1.0)
         rubble_fg = self._tint(RUBBLE_COLOR, alpha)
         for (rx, ry), ch in self._rubble.items():
-            cells.append(Cell(character=ch, coordinates=(rx, ry), fg=rubble_fg, bg=None))
+            cells.append(Cell(character=ch, coordinates=(rx, ry), fg=rubble_fg, bg=_OPAQUE_BLACK))
 
         # 6. Flung text debris
         live_flung: list[_Flung] = []
@@ -788,14 +796,7 @@ class InvadersEffect:
                             add(Cell(character="*", coordinates=(cx, cy), fg=kill_fg, bg=None))
         self._alien_kills = live_kills
 
-        # Erase ghost cells (positions rendered last frame that aren't rendered this frame)
-        erasers = [
-            Cell(character=" ", coordinates=pos, fg=None, bg=None)
-            for pos in self._prev_render_positions - current_positions
-        ]
-        self._prev_render_positions = current_positions
-
-        return [OutputCells(cells=erasers + cells)]
+        return [OutputCells(cells=cells)]
 
     # -- Main tick ------------------------------------------------------------
 
@@ -854,7 +855,7 @@ class InvadersEffect:
 
         elif self._phase == Phase.FADING:
             if self._fade_alpha() <= 0.0:
-                result = self._render_active()  # final ghost-erase at alpha=0
+                result = self._render_active()
                 self._phase = Phase.DONE
                 return result
             return self._render_active()

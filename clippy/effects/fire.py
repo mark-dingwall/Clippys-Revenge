@@ -133,8 +133,8 @@ def _lerp(a: float, b: float, t: float) -> float:
     return a + (b - a) * t
 
 
-def heat_to_color(heat: float) -> Color:
-    """Map heat value to RGBA color via linear interpolation."""
+def _heat_to_color_interp(heat: float) -> Color:
+    """Map heat value to RGBA color via linear interpolation (internal)."""
     if heat >= _COLOR_STOPS[0][0]:
         return _COLOR_STOPS[0][1]
     if heat <= _COLOR_STOPS[-1][0]:
@@ -151,6 +151,16 @@ def heat_to_color(heat: float) -> Color:
                 _lerp(c_lo[3], c_hi[3], t),
             )
     raise AssertionError("unreachable: heat_to_color fell through all stops")
+
+
+# Pre-computed 256-entry LUT: index i → color for heat = i/255
+_HEAT_LUT: list[Color] = [_heat_to_color_interp(i / 255.0) for i in range(256)]
+
+
+def heat_to_color(heat: float) -> Color:
+    """Map heat value [0,1] to RGBA color via pre-computed LUT."""
+    idx = max(0, min(255, int(heat * 255.0)))
+    return _HEAT_LUT[idx]
 
 
 def heat_to_char(heat: float) -> str:
@@ -242,10 +252,6 @@ class FireEffect:
 
         self._decay_heap: list[tuple[int, int, int]] = []
 
-        # Delta rendering state
-        self._prev_render_positions: set[tuple[int, int]] = set()
-        self._prev_render_content: dict[tuple[int, int], tuple[str, tuple | None, tuple | None]] = {}
-
         self._cancel_fade_start = 0
 
 
@@ -276,8 +282,6 @@ class FireEffect:
         self._is_hot = [[False] * width for _ in range(height)]
         self._shimmer_cells = []
         self._decay_heap = []
-        self._prev_render_positions = set()
-        self._prev_render_content = {}
         self._init_flow_field()
 
     def _ignite_initial(self) -> None:
@@ -395,8 +399,6 @@ class FireEffect:
         self._is_hot = []
         self._shimmer_cells = []
         self._decay_heap = []
-        self._prev_render_positions = set()
-        self._prev_render_content = {}
         self._flow_dir = []
         self._flow_str = []
 
@@ -802,31 +804,14 @@ class FireEffect:
             if (px, py) in occupied or p.tier >= len(CHARRED_TIERS):
                 continue
             ch = CHARRED_TIERS[p.tier][0]
-            smoke_fg: Color = (0.35, 0.30, 0.28, 0.7)
+            smoke_fg: Color = (0.467, 0.447, 0.490, 1.0)
             if fade_alpha < 1.0:
                 smoke_fg = _fade_color(smoke_fg, fade_alpha)
             buf[(px, py)] = Cell(character=ch, coordinates=(px, py), fg=smoke_fg, bg=None)
 
-        # -- Ghost erasure + content delta --
-        current_positions = set(buf.keys())
-        cells: list[Cell] = []
-
-        # Ghost erasure: erase positions rendered last frame but not this frame
-        for pos in self._prev_render_positions - current_positions:
-            if 0 <= pos[0] < w and 0 <= pos[1] < h:
-                cells.append(Cell(character=" ", coordinates=pos, fg=None, bg=None))
-
-        # Content delta: only emit cells whose content changed
-        prev_content = self._prev_render_content
-        new_content: dict[tuple[int, int], tuple[str, tuple | None, tuple | None]] = {}
-        for pos, cell in buf.items():
-            key = (cell.character, cell.fg, cell.bg)
-            new_content[pos] = key
-            if prev_content.get(pos) != key:
-                cells.append(cell)
-
-        self._prev_render_positions = current_positions
-        self._prev_render_content = new_content
+        # Emit all cells — tattoy replaces the layer per message,
+        # so every visible cell must be sent every frame.
+        cells = list(buf.values())
 
         if not cells:
             return []

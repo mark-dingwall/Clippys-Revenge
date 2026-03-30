@@ -53,7 +53,7 @@ DIST_R_MULT = 30.0
 
 # Trail rendering (matches JS DASH_TRAIL / DASH_ACCURACY)
 DASH_TRAIL = 0.15       # fraction of curve path visible as trail
-TRAIL_SAMPLES = 9       # sample points along trail (JS DASH_ACCURACY)
+TRAIL_SAMPLES = 5       # sample points along trail (reduced from 9)
 MIN_STROKE = 2          # min pixel width of microbe body
 MAX_STROKE = 4          # max pixel width
 
@@ -190,9 +190,6 @@ class MicrobesEffect:
         self._microbes: list[_Microbe] = []
         self._swarming_start = 0
         self._fade_start_tick = 0
-
-        # Ghost erasure (cell-space positions)
-        self._prev_cell_positions: set[tuple[int, int]] = set()
 
 
     # -- Initialization -------------------------------------------------------
@@ -384,7 +381,6 @@ class MicrobesEffect:
         self._microbes = []
         self._swarming_start = 0
         self._fade_start_tick = 0
-        self._prev_cell_positions = set()
 
     def _pick_delay(self) -> int:
         return round(self._rng.uniform(0.75, 1.25) * self._idle_secs * 30)
@@ -412,7 +408,6 @@ class MicrobesEffect:
         self._width = new_w
         self._height = new_h
         self._px_height = new_h * 2
-        self._prev_cell_positions = set()
 
         # Clamp microbes to new bounds
         for m in self._microbes:
@@ -477,7 +472,10 @@ class MicrobesEffect:
                 sx, sy = self._calc_pos(m, eased)
                 sx = max(0.0, min(float(max_x), sx))
                 sy = max(0.0, min(float(max_y), sy))
-                sample_pts.append((round(sx), round(sy)))
+                pt = (round(sx), round(sy))
+                # Deduplicate consecutive identical positions
+                if not sample_pts or pt != sample_pts[-1]:
+                    sample_pts.append(pt)
 
             sample_pts.reverse()
             n_samples = len(sample_pts)
@@ -503,32 +501,21 @@ class MicrobesEffect:
                     for px, py in _thicken_point(lx, ly, sw):
                         _add_pixel(px, py, color)
 
-        # Convert cell_colors to Cell list
-        cells: list[Cell] = []
+        active_cells: list[Cell] = []
         for (col, row), (top, bottom) in cell_colors.items():
             if top is not None and bottom is not None:
-                cells.append(Cell(character="\u2580", coordinates=(col, row),
-                                  fg=top, bg=bottom))
+                active_cells.append(Cell(character="\u2580", coordinates=(col, row),
+                                         fg=top, bg=bottom))
             elif top is not None:
-                cells.append(Cell(character="\u2580", coordinates=(col, row),
-                                  fg=top, bg=None))
+                active_cells.append(Cell(character="\u2580", coordinates=(col, row),
+                                         fg=top, bg=None))
             else:
-                cells.append(Cell(character="\u2584", coordinates=(col, row),
-                                  fg=bottom, bg=None))
+                active_cells.append(Cell(character="\u2584", coordinates=(col, row),
+                                         fg=bottom, bg=None))
 
-        # Ghost erasure (cell-space)
-        current_cell_positions = set(cell_colors.keys())
-        ghost_cells = [
-            Cell(character=" ", coordinates=pos, fg=None, bg=None)
-            for pos in self._prev_cell_positions - current_cell_positions
-            if 0 <= pos[0] < self._width and 0 <= pos[1] < self._height
-        ]
-        self._prev_cell_positions = current_cell_positions
-
-        all_cells = ghost_cells + cells
-        if not all_cells:
+        if not active_cells:
             return []
-        return [OutputCells(cells=all_cells)]
+        return [OutputCells(cells=active_cells)]
 
     # -- Phase transitions ----------------------------------------------------
 
