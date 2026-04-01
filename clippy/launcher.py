@@ -1,17 +1,79 @@
 """Clippy's Revenge launcher — CLI entry point.
 
 Discovers effects, generates tattoy config, and either lists effects,
-runs demo mode, or execs tattoy with the selected effect.
+runs demo mode, or execs tattoy with the selected effect(s).
 """
 from __future__ import annotations
 
 import argparse
 import importlib
 import os
+import random
 import shutil
 import stat
+import subprocess
 import sys
+import time
 from pathlib import Path
+
+# ---------------------------------------------------------------------------
+# ANSI colour constants
+# ---------------------------------------------------------------------------
+
+_GOLD = "\033[38;2;255;200;0m"
+_SKY = "\033[38;2;100;180;255m"
+_GREEN = "\033[38;2;80;200;80m"
+_AMBER = "\033[38;2;220;160;40m"
+_ORANGE = "\033[38;2;255;140;0m"
+_RESET = "\033[0m"
+
+# ---------------------------------------------------------------------------
+# Mascot face (static, ^-eyes variant for CLI messages)
+# ---------------------------------------------------------------------------
+
+_FACE_LINES = [
+    "╭──╮",
+    "^╭╮^",
+    "││╰╯",
+    "│╰─╯",
+    "╰──╯",
+]
+
+
+def _print_clippy_message(
+    headline: str,
+    body_lines: list[str],
+    file=None,
+) -> None:
+    """Render the mascot face alongside a speech-bubble message.
+
+    *file* can be a writable file object (default: sys.stderr) or a list,
+    in which case formatted lines are appended to the list instead of printed.
+    """
+    if file is None:
+        file = sys.stderr
+    max_body = max((len(line) for line in body_lines), default=0)
+    # W = total bubble width; +6 guarantees at least one ─ before ╮
+    W = max(max_body + 4, len(headline) + 6)
+    pad = W - 4  # content area for mid lines
+
+    top    = "╭─ " + headline + " " + "─" * (W - len(headline) - 5) + "╮"
+    bottom = "╰" + "─" * (W - 2) + "╯"
+    mid = [f"│ {line:<{pad}} │" for line in body_lines]
+
+    bubble = [top] + mid + [bottom]
+
+    face_count = len(_FACE_LINES)
+    total = max(face_count, len(bubble))
+
+    for i in range(total):
+        face_part = _FACE_LINES[i] if i < face_count else " " * len(_FACE_LINES[0])
+        bubble_part = bubble[i] if i < len(bubble) else ""
+        line = f"  {face_part}  {bubble_part}"
+        if isinstance(file, list):
+            file.append(line)
+        else:
+            print(line, file=file)
 
 
 def find_tattoy() -> str | None:
@@ -39,10 +101,152 @@ def _escape_toml_string(s: str) -> str:
     return s.replace("\\", "\\\\").replace('"', '\\"')
 
 
+def _find_maturin() -> str | None:
+    """Find the maturin binary on PATH or in common locations."""
+    result = shutil.which("maturin")
+    if result:
+        return result
+    user_bin = Path.home() / ".local" / "bin" / "maturin"
+    if user_bin.is_file() and os.access(user_bin, os.X_OK):
+        return str(user_bin)
+    return None
+
+
+def _try_build_native() -> bool:
+    """Auto-detect Rust and build the native module if possible.
+
+    Returns True if clippy_native is importable after this call.
+    Fails silently on any error — the pure-Python fallback is always available.
+    """
+    try:
+        import clippy_native  # noqa: F401
+        return True
+    except ImportError:
+        pass
+
+    if not shutil.which("cargo"):
+        return False
+
+    native_dir = Path(__file__).resolve().parent.parent / "native"
+    if not (native_dir / "Cargo.toml").is_file():
+        return False
+
+    maturin = _find_maturin()
+    if not maturin:
+        try:
+            subprocess.run(
+                [sys.executable, "-m", "pip", "install", "-q", "maturin"],
+                capture_output=True, timeout=60, check=True,
+            )
+        except (subprocess.SubprocessError, OSError):
+            return False
+        maturin = _find_maturin()
+        if not maturin:
+            return False
+
+    print("Building Rust acceleration module (one-time setup)...", file=sys.stderr)
+    try:
+        subprocess.run(
+            [maturin, "build", "--release", "-i", sys.executable],
+            cwd=str(native_dir), capture_output=True, timeout=180, check=True,
+        )
+    except (subprocess.SubprocessError, OSError):
+        print("  Build failed — continuing in pure Python mode.", file=sys.stderr)
+        return False
+
+    # Find the most recently built wheel and install it
+    wheels_dir = native_dir / "target" / "wheels"
+    wheels = sorted(wheels_dir.glob("*.whl"), key=lambda p: p.stat().st_mtime, reverse=True)
+    if not wheels:
+        return False
+
+    try:
+        subprocess.run(
+            [sys.executable, "-m", "pip", "install", "-q", "--force-reinstall", str(wheels[0])],
+            capture_output=True, timeout=60, check=True,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return False
+
+    # Retry import with fresh caches
+    importlib.invalidate_caches()
+    sys.modules.pop("clippy_native", None)
+    try:
+        import clippy_native  # noqa: F401, F811
+        print("  Done! Rust acceleration active.", file=sys.stderr)
+        return True
+    except ImportError:
+        return False
+
+
+def _show_startup(
+    selected_names: list[str],
+    selectable: dict[str, dict],
+    using_native: bool,
+    no_toast: bool,
+) -> None:
+    """Print colour-coded startup banner with animated loading bar to stderr."""
+    if selected_names:
+        names_str = ", ".join(f"{_SKY}{n}{_RESET}" for n in selected_names)
+        print(
+            f"{_GOLD}Clippy's Revenge{_RESET} — effects: {names_str}",
+            file=sys.stderr,
+        )
+    else:
+        names_str = ", ".join(f"{_SKY}{n}{_RESET}" for n in sorted(selectable))
+        print(
+            f"{_GOLD}Clippy's Revenge{_RESET} — cycling: {names_str}",
+            file=sys.stderr,
+        )
+
+    if not no_toast:
+        if using_native:
+            print(f"  {_GREEN}Rust-optimised mode{_RESET}", file=sys.stderr)
+        else:
+            print(
+                f"  {_AMBER}Pure Python mode{_RESET} — see README.md for Rust acceleration",
+                file=sys.stderr,
+            )
+
+    # Animated paperclip loading bar
+    segments = 20
+    base_delay = 0.5 / segments
+    rng = random.Random()
+    sys.stderr.write("  Preparing chaos... ")
+    sys.stderr.flush()
+    for i in range(segments):
+        char = f"{_ORANGE}⊂⟄{_RESET}" if i % 2 == 0 else f"{_ORANGE}⟃⊃{_RESET}"
+        sys.stderr.write(char)
+        sys.stderr.flush()
+        jitter = base_delay * (0.5 + rng.random())
+        time.sleep(jitter)
+    sys.stderr.write("\n")
+    sys.stderr.flush()
+
+
+def _parse_effect_names(raw: str, valid_names: set[str]) -> tuple[list[str], list[str]]:
+    """Parse comma-separated effect names, dedup preserving order.
+
+    Returns (valid, invalid) lists.
+    """
+    seen: set[str] = set()
+    valid: list[str] = []
+    invalid: list[str] = []
+    for part in raw.split(","):
+        name = part.strip().lower()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        if name in valid_names:
+            valid.append(name)
+        else:
+            invalid.append(name)
+    return valid, invalid
+
+
 def generate_config(
     effect_paths: list[str],
     shell_cmd: str | None = None,
-    fps: int = 30,
     config_dir: str | None = None,
 ) -> str:
     """Generate tattoy.toml (and palette.toml if absent) and return the config dir path.
@@ -60,7 +264,7 @@ def generate_config(
 
     toml_content = (
         f'command = "{_escape_toml_string(shell_cmd)}"\n'
-        f"frame_rate = {fps}\n"
+        f"frame_rate = 30\n"
         f"show_tattoy_indicator = false\n"
         f"show_startup_logo = false\n"
         f"\n"
@@ -90,15 +294,30 @@ def generate_config(
     return str(out_dir)
 
 
+class _ClippyArgumentParser(argparse.ArgumentParser):
+    """ArgumentParser subclass that prepends the Clippy mascot to --help."""
+
+    def format_help(self) -> str:
+        lines: list[str] = []
+        _print_clippy_message(
+            "It looks like you're trying to get help!",
+            [],
+            file=lines,
+        )
+        lines.append("")
+        lines.append(super().format_help())
+        return "\n".join(lines)
+
+
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+    parser = _ClippyArgumentParser(
         prog="clippy",
         description="Clippy's Revenge — chaotic terminal effects via tattoy",
     )
     parser.add_argument(
-        "--effect", "-e",
-        metavar="NAME",
-        help="effect to use (default: random)",
+        "--effects", "-e",
+        metavar="NAMES",
+        help="comma-separated effect name(s) (default: cycle all)",
     )
     parser.add_argument(
         "--list", "-l",
@@ -111,10 +330,17 @@ def _build_parser() -> argparse.ArgumentParser:
         help="standalone ANSI preview (no tattoy required)",
     )
     parser.add_argument(
-        "--fps",
-        type=int,
-        default=30,
-        help="frame rate (default: 30)",
+        "--optimised",
+        choices=["on", "off"],
+        default=None,
+        help="force Rust acceleration on/off (default: auto-detect)",
+    )
+    parser.add_argument(
+        "--shake",
+        metavar="MODE",
+        default=None,
+        help="cursor-shake detection: 'off' to disable, or an integer sensitivity "
+             "(number of reversals needed, default 5; higher = harder to trigger)",
     )
     parser.add_argument(
         "command",
@@ -134,21 +360,70 @@ def main(argv: list[str] | None = None) -> int:
     selectable = {k: v for k, v in effects.items() if not v.get("overlay")}
     overlays   = {k: v for k, v in effects.items() if     v.get("overlay")}
 
-    # --list (overlays excluded)
+    # --list (overlays excluded) — no native build needed
     if args.list:
         if not selectable:
-            print("No effects found.")
+            _print_clippy_message(
+                "It looks like you're trying to wreak havoc!",
+                ["No effects found."],
+                file=sys.stdout,
+            )
             return 0
-        for name, meta in sorted(selectable.items()):
-            desc = meta.get("description", "")
-            print(f"  {name:20s} {desc}")
+        body = [f"  {name:18s} {meta.get('description', '')}" for name, meta in sorted(selectable.items())]
+        _print_clippy_message(
+            "It looks like you're trying to pick an effect!",
+            body,
+            file=sys.stdout,
+        )
         return 0
+
+    # --optimised handling
+    no_toast = os.environ.get("CLIPPY_NO_TOAST", "").lower() in ("1", "true", "yes")
+    force_python = os.environ.get("CLIPPY_FORCE_PYTHON", "").lower() in ("1", "true", "yes")
+
+    if args.optimised == "off":
+        using_native = False
+    elif args.optimised == "on":
+        try:
+            import clippy_native  # noqa: F401
+            using_native = True
+        except ImportError:
+            _print_clippy_message(
+                "It looks like you're trying to go fast!",
+                [
+                    "Rust acceleration module not found.",
+                    "",
+                    "Build it with:",
+                    "  pip install maturin",
+                    "  cd native && maturin develop --release",
+                ],
+            )
+            return 1
+    else:
+        using_native = not force_python and _try_build_native()
+
+    # --shake handling
+    if args.shake is not None:
+        val = args.shake.strip().lower()
+        if val == "off":
+            os.environ["CLIPPY_SHAKE"] = "off"
+        elif val.isdigit() and int(val) > 0:
+            os.environ["CLIPPY_SHAKE"] = val
+        else:
+            _print_clippy_message(
+                "It looks like you're trying to configure shake!",
+                [f"Invalid --shake value: {args.shake!r}", "", "Use 'off' or a positive integer."],
+            )
+            return 1
 
     # --demo (all effects allowed, including overlays)
     if args.demo:
         if args.demo not in effects:
-            print(f"Unknown effect: {args.demo}", file=sys.stderr)
-            print(f"Available: {', '.join(sorted(effects))}", file=sys.stderr)
+            available = ", ".join(sorted(effects))
+            _print_clippy_message(
+                "It looks like you're trying to demo an effect!",
+                [f"Unknown effect: {args.demo}", "", f"Available: {available}"],
+            )
             return 1
 
         meta = effects[args.demo]
@@ -156,10 +431,8 @@ def main(argv: list[str] | None = None) -> int:
         effect_class = getattr(module, meta["class_name"])
 
         if meta.get("overlay"):
-            # Standalone overlay demo (e.g. --demo mascot)
             effect = effect_class(idle_secs=0)
         else:
-            # Wrap in UnifiedEffect for demo mode
             from clippy.unified import UnifiedEffect
             effect = UnifiedEffect(effect_class, idle_secs=0)
 
@@ -169,37 +442,73 @@ def main(argv: list[str] | None = None) -> int:
             cols = int(os.environ.get("COLUMNS", 80))
             rows = int(os.environ.get("LINES", 24))
 
+        toast = None
+        if not no_toast:
+            if using_native:
+                toast = "Rust-optimised mode | CLIPPY_NO_TOAST=1 to hide"
+            else:
+                toast = "Python mode | see README.md for Rust speed | CLIPPY_NO_TOAST=1 to hide"
+
         from clippy.demo import demo_run
         try:
-            demo_run(effect, cols, rows, fps=args.fps)
+            demo_run(effect, cols, rows, toast=toast, toast_is_native=using_native)
         except KeyboardInterrupt:
             pass
         return 0
 
-    # Select effect (overlays not selectable via --effect or random)
-    if args.effect:
-        if args.effect in overlays:
-            print(f"'{args.effect}' is an overlay effect and cannot be used with --effect.", file=sys.stderr)
-            print(f"Use --demo {args.effect} to preview it.", file=sys.stderr)
+    # Select effect(s) (overlays not selectable)
+    selected_names: list[str] = []
+    if args.effects:
+        valid, invalid = _parse_effect_names(args.effects, set(selectable))
+
+        # Check for overlay names in the invalid list
+        overlay_hits = [n for n in invalid if n in overlays]
+        if overlay_hits:
+            _print_clippy_message(
+                "It looks like you're trying to use an overlay!",
+                [
+                    f"'{', '.join(overlay_hits)}' cannot be used with --effects.",
+                    f"Use --demo {overlay_hits[0]} to preview it.",
+                ],
+            )
             return 1
-        if args.effect not in selectable:
-            print(f"Unknown effect: {args.effect}", file=sys.stderr)
-            print(f"Available: {', '.join(sorted(selectable))}", file=sys.stderr)
+
+        if not valid:
+            body = [f"Unknown effect(s): {', '.join(invalid)}", ""]
+            body += [f"  {n:18s} {m.get('description', '')}" for n, m in sorted(selectable.items())]
+            _print_clippy_message(
+                "It looks like you're trying to pick effects!",
+                body,
+            )
             return 1
-        selected = args.effect
+
+        if invalid:
+            _print_clippy_message(
+                "It looks like you made a typo!",
+                [f"Ignoring unknown effect(s): {', '.join(invalid)}"],
+            )
+
+        selected_names = valid
     else:
         if not selectable:
-            print("No effects found.", file=sys.stderr)
+            _print_clippy_message(
+                "It looks like you're trying to wreak havoc!",
+                ["No effects found."],
+            )
             return 1
-        selected = None  # unified_runner will cycle through all effects
 
     # Require tattoy
     tattoy_path = find_tattoy()
     if tattoy_path is None:
-        print("Error: tattoy not found.", file=sys.stderr)
-        print("", file=sys.stderr)
-        print("Install tattoy:  https://tattoy.sh", file=sys.stderr)
-        print("  Or:  cargo install tattoy", file=sys.stderr)
+        _print_clippy_message(
+            "It looks like you're trying to launch Clippy!",
+            [
+                "tattoy not found.",
+                "",
+                "Install tattoy:  https://tattoy.sh",
+                "  Or:  cargo install tattoy",
+            ],
+        )
         return 1
 
     # Use unified runner as the plugin entry point
@@ -212,11 +521,12 @@ def main(argv: list[str] | None = None) -> int:
     if project_root not in existing.split(os.pathsep):
         os.environ["PYTHONPATH"] = project_root + (os.pathsep + existing if existing else "")
 
-    # Tell unified_runner which effect to use (if pinned)
-    if selected:
-        os.environ["CLIPPY_EFFECT"] = selected
+    # Tell unified_runner which effect(s) to use
+    os.environ.pop("CLIPPY_EFFECT", None)  # clean up old singular env var
+    if selected_names:
+        os.environ["CLIPPY_EFFECTS"] = ",".join(selected_names)
     else:
-        os.environ.pop("CLIPPY_EFFECT", None)
+        os.environ.pop("CLIPPY_EFFECTS", None)
 
     # Build shell command
     shell_cmd = " ".join(args.command) if args.command else None
@@ -225,13 +535,9 @@ def main(argv: list[str] | None = None) -> int:
     config_path = generate_config(
         effect_paths=[runner_path],
         shell_cmd=shell_cmd,
-        fps=args.fps,
     )
 
-    if selected:
-        print(f"Launching Clippy's Revenge with '{selected}' effect...")
-    else:
-        print(f"Launching Clippy's Revenge cycling through: {', '.join(sorted(selectable))}...")
+    _show_startup(selected_names, selectable, using_native, no_toast)
 
     os.execvp(tattoy_path, [tattoy_path, "--config-dir", config_path])
     return 0  # unreachable, but keeps the type checker happy

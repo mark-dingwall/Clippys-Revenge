@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Unified runner — tattoy plugin entry point.
 
-Reads CLIPPY_EFFECT env var, loads the effect class, wraps in UnifiedEffect,
-and runs the protocol loop.
+Reads CLIPPY_EFFECTS env var (comma-separated), loads effect class(es),
+wraps in UnifiedEffect, and runs the protocol loop.
 """
 from __future__ import annotations
 
@@ -41,9 +41,10 @@ def _load_all_selectable_classes() -> list:
 
 
 if __name__ == "__main__":
-    effect_name = os.environ.get("CLIPPY_EFFECT")
-    if effect_name:
-        effect_classes = [_load_effect_class(effect_name)]
+    effect_names_raw = os.environ.get("CLIPPY_EFFECTS", "")
+    if effect_names_raw:
+        names = [n.strip() for n in effect_names_raw.split(",") if n.strip()]
+        effect_classes = [_load_effect_class(name) for name in names]
     else:
         effect_classes = _load_all_selectable_classes()
     unified = UnifiedEffect(effect_classes, seed=random.randrange(2**32))

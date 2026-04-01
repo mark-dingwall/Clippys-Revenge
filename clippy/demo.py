@@ -160,6 +160,18 @@ def _highlight_python(s: str) -> str:
     return "".join(result)
 
 
+def _render_toast(msg: str, width: int, is_native: bool, writer) -> None:
+    """Render a full-width toast bar at the top of the screen."""
+    padded = msg.center(width)[:width]
+    if is_native:
+        bg = "\033[48;2;20;60;20m"
+        fg = "\033[38;2;120;220;120m"
+    else:
+        bg = "\033[48;2;60;50;15m"
+        fg = "\033[38;2;220;190;80m"
+    writer(move_to(0, 0) + bg + fg + padded + RESET)
+
+
 def _render_ide_template(width: int, height: int, writer) -> None:
     """Write the fake IDE background to the terminal (no flush)."""
     rows = build_template(width, height)
@@ -190,6 +202,8 @@ def demo_run(
     sleep=None,
     writer=None,
     flush=None,
+    toast: str | None = None,
+    toast_is_native: bool = False,
 ) -> None:
     """Run an effect in demo mode, rendering directly to terminal.
 
@@ -220,19 +234,34 @@ def demo_run(
     ]
     effect.on_pty_update(PTYUpdate(size=(width, height), cells=demo_cells, cursor=(0, 0)))
 
+    toast_frames = int(2.0 * fps) if toast else 0
+    frame_count = 0
+
     writer(ALT_SCREEN_ON)
     writer(HIDE_CURSOR)
     writer(CLEAR)
     _render_ide_template(width, height, writer)
+    if toast:
+        _render_toast(toast, width, toast_is_native, writer)
     flush()
 
     try:
         while True:
             frame_start = clock()
+            frame_count += 1
 
             outputs = effect.tick()
             if outputs:
                 render_frame(outputs, writer, flush)
+
+            if toast:
+                if frame_count <= toast_frames:
+                    _render_toast(toast, width, toast_is_native, writer)
+                    flush()
+                elif frame_count == toast_frames + 1:
+                    # Restore title bar underneath
+                    writer(move_to(0, 0) + _BAR_BG + _IDE_FG + rows[0] + RESET)
+                    flush()
 
             # Stop if effect declares itself done
             phase = getattr(effect, "phase", None)

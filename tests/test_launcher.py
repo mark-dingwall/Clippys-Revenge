@@ -11,6 +11,7 @@ import pytest
 from clippy.effects import discover_effects
 from clippy.launcher import (
     _escape_toml_string,
+    _parse_effect_names,
     ensure_executable,
     find_tattoy,
     generate_config,
@@ -107,12 +108,11 @@ class TestGenerateConfig:
         config_dir = generate_config(
             ["/path/to/fire.py"],
             shell_cmd="/bin/zsh",
-            fps=60,
             config_dir=str(tmp_path),
         )
         content = (Path(config_dir) / "tattoy.toml").read_text()
         assert 'command = "/bin/zsh"' in content
-        assert "frame_rate = 60" in content
+        assert "frame_rate = 30" in content
         assert 'path = "/path/to/fire.py"' in content
         assert "[[plugins]]" in content
         assert 'name = "fire"' in content
@@ -174,42 +174,57 @@ class TestGenerateConfig:
 # ---------------------------------------------------------------------------
 
 class TestMain:
+    def test_help_shows_clippy(self, capsys):
+        with pytest.raises(SystemExit, match="0"):
+            main(["--help"])
+        out = capsys.readouterr().out
+        assert "It looks like" in out
+        assert "^╭╮^" in out
+        assert "--effects" in out
+
     def test_list_effects(self, capsys):
         assert main(["--list"]) == 0
-        assert "fire" in capsys.readouterr().out
+        out = capsys.readouterr().out
+        assert "fire" in out
+        assert "It looks like" in out
+        assert "^╭╮^" in out
 
     def test_list_empty(self, capsys):
         with mock.patch("clippy.effects.discover_effects", return_value={}):
             assert main(["--list"]) == 0
         assert "No effects" in capsys.readouterr().out
 
-    def test_unknown_effect(self, capsys):
-        assert main(["--effect", "nonexistent"]) == 1
-        assert "Unknown effect" in capsys.readouterr().err
+    def test_effects_all_invalid(self, capsys):
+        assert main(["--effects", "bogus"]) == 1
+        err = capsys.readouterr().err
+        assert "It looks like" in err
+        assert "^╭╮^" in err
 
     def test_demo_runs(self):
         with mock.patch("clippy.demo.demo_run") as mock_demo:
             assert main(["--demo", "fire"]) == 0
         mock_demo.assert_called_once()
-        _, kwargs = mock_demo.call_args
-        assert kwargs["fps"] == 30
 
     def test_demo_unknown(self, capsys):
         assert main(["--demo", "nonexistent"]) == 1
-        assert "Unknown effect" in capsys.readouterr().err
+        err = capsys.readouterr().err
+        assert "It looks like" in err
 
     def test_no_tattoy(self, capsys):
-        with mock.patch("clippy.launcher.find_tattoy", return_value=None):
-            assert main(["--effect", "fire"]) == 1
+        with mock.patch("clippy.launcher.find_tattoy", return_value=None), \
+             mock.patch("clippy.launcher._try_build_native", return_value=False):
+            assert main(["--effects", "fire"]) == 1
         captured = capsys.readouterr()
         assert "tattoy not found" in captured.err
+        assert "It looks like" in captured.err
 
     def test_launch_execs_tattoy(self, tmp_path):
         with mock.patch("clippy.launcher.find_tattoy", return_value="/usr/bin/tattoy"), \
              mock.patch("clippy.launcher.generate_config", return_value="/tmp/test.toml"), \
              mock.patch("clippy.launcher.ensure_executable"), \
+             mock.patch("time.sleep"), \
              mock.patch("os.execvp") as mock_exec:
-            main(["--effect", "fire"])
+            main(["--effects", "fire"])
 
         mock_exec.assert_called_once()
         args = mock_exec.call_args[0]
@@ -221,8 +236,9 @@ class TestMain:
         with mock.patch("clippy.launcher.find_tattoy", return_value="/usr/bin/tattoy"), \
              mock.patch("clippy.launcher.generate_config", return_value="/tmp/test.toml") as mock_gen, \
              mock.patch("clippy.launcher.ensure_executable"), \
+             mock.patch("time.sleep"), \
              mock.patch("os.execvp"):
-            main(["--effect", "fire", "--", "vim", "file.txt"])
+            main(["--effects", "fire", "--", "vim", "file.txt"])
 
         _, kwargs = mock_gen.call_args
         assert kwargs["shell_cmd"] == "vim file.txt"
@@ -243,10 +259,11 @@ class TestMain:
         assert "fire" in out
         assert "mascot" not in out
 
-    def test_effect_overlay_rejected(self, capsys):
-        assert main(["--effect", "mascot"]) == 1
+    def test_effects_overlay_rejected(self, capsys):
+        assert main(["--effects", "mascot"]) == 1
         err = capsys.readouterr().err
         assert "overlay" in err.lower()
+        assert "It looks like" in err
 
     def test_demo_overlay_allowed(self):
         with mock.patch("clippy.demo.demo_run"):
@@ -256,44 +273,118 @@ class TestMain:
         with mock.patch("clippy.launcher.find_tattoy", return_value="/usr/bin/tattoy"), \
              mock.patch("clippy.launcher.generate_config", return_value="/tmp/test.toml") as mock_gen, \
              mock.patch("clippy.launcher.ensure_executable"), \
+             mock.patch("time.sleep"), \
              mock.patch("os.execvp"):
-            main(["--effect", "fire"])
+            main(["--effects", "fire"])
         _, kwargs = mock_gen.call_args
         assert len(kwargs["effect_paths"]) == 1
         assert "unified_runner" in kwargs["effect_paths"][0]
 
-    def test_fps_flag_forwarded_to_generate_config(self):
-        """--fps 60 is forwarded to generate_config as fps=60."""
-        with mock.patch("clippy.launcher.find_tattoy", return_value="/usr/bin/tattoy"), \
-             mock.patch("clippy.launcher.generate_config", return_value="/tmp/test.toml") as mock_gen, \
-             mock.patch("clippy.launcher.ensure_executable"), \
-             mock.patch("os.execvp"):
-            main(["--effect", "fire", "--fps", "60"])
-
-        _, kwargs = mock_gen.call_args
-        assert kwargs["fps"] == 60
-
-    def test_no_effect_flag_does_not_set_env(self):
-        """When no --effect flag, CLIPPY_EFFECT is NOT set in env."""
+    def test_no_effects_flag_does_not_set_env(self):
+        """When no --effects flag, CLIPPY_EFFECTS is NOT set in env."""
         with mock.patch("clippy.launcher.find_tattoy", return_value="/usr/bin/tattoy"), \
              mock.patch("clippy.launcher.generate_config", return_value="/tmp/test.toml"), \
              mock.patch("clippy.launcher.ensure_executable"), \
+             mock.patch("time.sleep"), \
              mock.patch("os.execvp"):
-            # Pre-set to verify it gets removed
+            os.environ["CLIPPY_EFFECTS"] = "stale"
             os.environ["CLIPPY_EFFECT"] = "stale"
             main([])
 
+        assert "CLIPPY_EFFECTS" not in os.environ
         assert "CLIPPY_EFFECT" not in os.environ
 
-    def test_effect_flag_sets_env(self):
-        """--effect fire sets CLIPPY_EFFECT=fire in env."""
+    def test_effects_flag_sets_env(self):
+        """--effects fire sets CLIPPY_EFFECTS=fire in env."""
         with mock.patch("clippy.launcher.find_tattoy", return_value="/usr/bin/tattoy"), \
              mock.patch("clippy.launcher.generate_config", return_value="/tmp/test.toml"), \
              mock.patch("clippy.launcher.ensure_executable"), \
+             mock.patch("time.sleep"), \
              mock.patch("os.execvp"):
-            main(["--effect", "fire"])
+            main(["--effects", "fire"])
 
-        assert os.environ.get("CLIPPY_EFFECT") == "fire"
+        assert os.environ.get("CLIPPY_EFFECTS") == "fire"
+
+    def test_effects_comma_separated(self):
+        """--effects fire,grove sets CLIPPY_EFFECTS=fire,grove."""
+        with mock.patch("clippy.launcher.find_tattoy", return_value="/usr/bin/tattoy"), \
+             mock.patch("clippy.launcher.generate_config", return_value="/tmp/test.toml"), \
+             mock.patch("clippy.launcher.ensure_executable"), \
+             mock.patch("time.sleep"), \
+             mock.patch("os.execvp"):
+            main(["--effects", "fire,grove"])
+
+        assert os.environ.get("CLIPPY_EFFECTS") == "fire,grove"
+
+    def test_effects_deduplicates(self):
+        """--effects fire,fire,grove deduplicates to fire,grove."""
+        with mock.patch("clippy.launcher.find_tattoy", return_value="/usr/bin/tattoy"), \
+             mock.patch("clippy.launcher.generate_config", return_value="/tmp/test.toml"), \
+             mock.patch("clippy.launcher.ensure_executable"), \
+             mock.patch("time.sleep"), \
+             mock.patch("os.execvp"):
+            main(["--effects", "fire,fire,grove"])
+
+        assert os.environ.get("CLIPPY_EFFECTS") == "fire,grove"
+
+    def test_effects_strips_whitespace(self):
+        """--effects ' fire , grove ' strips whitespace."""
+        with mock.patch("clippy.launcher.find_tattoy", return_value="/usr/bin/tattoy"), \
+             mock.patch("clippy.launcher.generate_config", return_value="/tmp/test.toml"), \
+             mock.patch("clippy.launcher.ensure_executable"), \
+             mock.patch("time.sleep"), \
+             mock.patch("os.execvp"):
+            main(["--effects", " fire , grove "])
+
+        assert os.environ.get("CLIPPY_EFFECTS") == "fire,grove"
+
+    def test_effects_partial_invalid(self, capsys):
+        """--effects fire,bogus warns but continues with fire only."""
+        with mock.patch("clippy.launcher.find_tattoy", return_value="/usr/bin/tattoy"), \
+             mock.patch("clippy.launcher.generate_config", return_value="/tmp/test.toml"), \
+             mock.patch("clippy.launcher.ensure_executable"), \
+             mock.patch("time.sleep"), \
+             mock.patch("os.execvp"):
+            result = main(["--effects", "fire,bogus"])
+
+        assert result == 0
+        assert os.environ.get("CLIPPY_EFFECTS") == "fire"
+        err = capsys.readouterr().err
+        assert "Ignoring unknown" in err
+
+    def test_optimised_off(self):
+        """--optimised off skips native build."""
+        with mock.patch("clippy.launcher.find_tattoy", return_value="/usr/bin/tattoy"), \
+             mock.patch("clippy.launcher.generate_config", return_value="/tmp/test.toml"), \
+             mock.patch("clippy.launcher.ensure_executable"), \
+             mock.patch("clippy.launcher._try_build_native") as mock_build, \
+             mock.patch("time.sleep"), \
+             mock.patch("os.execvp"):
+            main(["--effects", "fire", "--optimised", "off"])
+
+        mock_build.assert_not_called()
+
+    def test_optimised_on_success(self):
+        """--optimised on with native available proceeds."""
+        with mock.patch("clippy.launcher.find_tattoy", return_value="/usr/bin/tattoy"), \
+             mock.patch("clippy.launcher.generate_config", return_value="/tmp/test.toml"), \
+             mock.patch("clippy.launcher.ensure_executable"), \
+             mock.patch.dict("sys.modules", {"clippy_native": mock.MagicMock()}), \
+             mock.patch("time.sleep"), \
+             mock.patch("os.execvp"):
+            result = main(["--effects", "fire", "--optimised", "on"])
+
+        assert result == 0
+
+    def test_optimised_on_missing(self, capsys):
+        """--optimised on with native unavailable exits 1 with instructions."""
+        with mock.patch.dict("sys.modules", {"clippy_native": None}):
+            result = main(["--effects", "fire", "--optimised", "on"])
+
+        assert result == 1
+        err = capsys.readouterr().err
+        assert "It looks like" in err
+        assert "maturin" in err
 
 
 class TestGenerateConfigSinglePlugin:
@@ -305,3 +396,54 @@ class TestGenerateConfigSinglePlugin:
         content = (Path(config_dir) / "tattoy.toml").read_text()
         assert content.count("[[plugins]]") == 1
         assert "layer = 1" in content
+
+
+# ---------------------------------------------------------------------------
+# _parse_effect_names unit tests
+# ---------------------------------------------------------------------------
+
+class TestParseEffectNames:
+    def test_single_valid(self):
+        valid, invalid = _parse_effect_names("fire", {"fire", "grove"})
+        assert valid == ["fire"]
+        assert invalid == []
+
+    def test_comma_separated(self):
+        valid, invalid = _parse_effect_names("fire,grove", {"fire", "grove"})
+        assert valid == ["fire", "grove"]
+        assert invalid == []
+
+    def test_strips_whitespace(self):
+        valid, invalid = _parse_effect_names(" fire , grove ", {"fire", "grove"})
+        assert valid == ["fire", "grove"]
+        assert invalid == []
+
+    def test_lowercases(self):
+        valid, invalid = _parse_effect_names("Fire,GROVE", {"fire", "grove"})
+        assert valid == ["fire", "grove"]
+        assert invalid == []
+
+    def test_deduplicates(self):
+        valid, invalid = _parse_effect_names("fire,fire,grove", {"fire", "grove"})
+        assert valid == ["fire", "grove"]
+        assert invalid == []
+
+    def test_invalid_names(self):
+        valid, invalid = _parse_effect_names("bogus", {"fire", "grove"})
+        assert valid == []
+        assert invalid == ["bogus"]
+
+    def test_mixed_valid_invalid(self):
+        valid, invalid = _parse_effect_names("fire,bogus,grove", {"fire", "grove"})
+        assert valid == ["fire", "grove"]
+        assert invalid == ["bogus"]
+
+    def test_empty_string(self):
+        valid, invalid = _parse_effect_names("", {"fire"})
+        assert valid == []
+        assert invalid == []
+
+    def test_empty_segments(self):
+        valid, invalid = _parse_effect_names("fire,,grove", {"fire", "grove"})
+        assert valid == ["fire", "grove"]
+        assert invalid == []
