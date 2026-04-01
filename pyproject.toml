@@ -15,6 +15,7 @@ dev = [
     "pytest>=8,<9",
     "mypy>=1.0",
 ]
+fast = ["maturin>=1.0,<2.0"]
 
 [tool.setuptools.packages.find]
 include = ["clippy*"]
