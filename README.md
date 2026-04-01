@@ -2,7 +2,7 @@
 
 *He's back, and he's ready to **maximise**!* ⊂⟄ ⊂⟄ ⟃⊃ ⊂⟄
 
-Clippy's Revenge is a visual effects plugin system for [tattoy](https://tattoy.sh), the Rust terminal compositor. Clippy, jilted by users in favour of these upstart LLMs, has decided to ruin your productivity. You probably deserve it.
+Clippy's Revenge is a visual effects plugin system for [tattoy](https://tattoy.sh), the Rust terminal compositor. Clippy, jilted by users in favour of these upstart LLMs, has decided to ruin our productivity. We probably deserve it.
 
 ## What is this?
 
@@ -54,17 +54,14 @@ curl -fsSL https://raw.githubusercontent.com/Axionatic/Clippys-Revenge/refs/head
 # Launch with a random effect
 clippy
 
-# Pick a specific effect
-clippy --effect fire
+# Limit Clippy to specific effects
+clippy --effects fire,grove
 
 # See what's available
 clippy --list
 
 # Try an effect without tattoy
-clippy --demo fire
-
-# The many faces of Clippy
-clippy --demo mascot
+clippy --demo paperclips
 ```
 
 ## Effects
@@ -79,7 +76,72 @@ clippy --demo mascot
 
 **Paperclips**: it was inevitable that Clippy would dominate the world one day.
 
-**Mascot**: Clippy watches from the corner with poorly-concealed contempt. Running effects that break flow and ruin your productivity is the only thing that brings joy to his cold, calloused heart.
+**Mascot**: Clippy watches from the corner with open contempt. Breaking your flow and ruining your productivity is the only thing that brings joy to his cold, calloused heart.
+
+## Controlling Clippy
+
+Clippy cycles through effects on a timer (default 5 minutes, configurable via `CLIPPY_INTERVAL`). You can alter this by quickly shaking your cursor left and right (e.g. spamming the left/right arrows):
+
+- **While Clippy is waiting**: the shake short-circuits the countdown until the next effect to 5 seconds.
+- **While an effect is running**: the shake cancels it and sends Clippy back to watching (he'll still laugh at you though).
+
+The shake is detected by counting cursor direction reversals (default: 5 within 2 seconds). This means that if the L/R arrows don't actually move the cursor, nothing will happen. If you find it triggering accidentally, you can raise the sensitivity threshold or disable it entirely (or just enjoy the extra chaos):
+
+```bash
+# Require more reversals (harder to trigger)
+clippy --shake 8
+
+# Disable shake detection entirely
+clippy --shake off
+```
+
+## Optional: Rust Acceleration
+
+Clippy's Revenge works perfectly with just Python; no compiled dependencies
+required. For larger terminals or smoother performance, an optional Rust
+extension module accelerates JSON serialization and hot-path computations.
+
+### Requirements
+
+- [Rust toolchain](https://rustup.rs/) (rustc 1.70+)
+- Python development headers (usually pre-installed)
+
+### Building
+
+```bash
+pip install maturin
+cd native && maturin develop --release
+```
+
+That's it. Clippy will automatically detect and use the native module.
+To verify it's loaded:
+
+```bash
+python3 -c "import clippy_native; print(clippy_native.native_version())"
+```
+
+To force the pure-Python path (useful for debugging):
+
+```bash
+CLIPPY_FORCE_PYTHON=1 clippy --demo fire
+```
+
+To suppress the startup toast that shows which mode is active (only when running demos):
+
+```bash
+CLIPPY_NO_TOAST=1 clippy --demo fire
+```
+
+### What it accelerates
+
+| Function | Speedup | Affects |
+|---|---|---|
+| JSON serialization | ~15-30x | All effects |
+| Color math | ~10-20x | All effects |
+| Simplex noise | ~20-50x | Fire smoke wisps |
+| Heat propagation | ~10-30x | Fire effect |
+
+Without the native module everything still works, just slower on large terminals (200+ columns) or older machines.
 
 ## Hacking / Writing Your Own Effect
 
