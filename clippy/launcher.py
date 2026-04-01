@@ -248,11 +248,13 @@ def generate_config(
     effect_paths: list[str],
     shell_cmd: str | None = None,
     config_dir: str | None = None,
+    theme=None,
 ) -> str:
     """Generate tattoy.toml (and palette.toml if absent) and return the config dir path.
 
     config_dir defaults to ~/.cache/clippys-revenge/ (overridable for tests).
     Each path in effect_paths gets its own [[plugins]] block at layer 1.
+    If *theme* is a Theme instance, palette.toml is always regenerated from it.
     """
     if shell_cmd is None:
         shell_cmd = os.environ.get("SHELL", "/bin/bash")
@@ -284,10 +286,13 @@ def generate_config(
 
     (out_dir / "tattoy.toml").write_text(toml_content)
 
-    # Pre-seed palette.toml so tattoy skips interactive palette detection.
-    # Without this, tattoy prompts the user on first run, which fails in WSL/multiplexers.
     palette_path = out_dir / "palette.toml"
-    if not palette_path.exists():
+    if theme is not None:
+        # Theme provided — always regenerate palette from it
+        from clippy.themes import theme_to_palette_toml
+        palette_path.write_text(theme_to_palette_toml(theme))
+    elif not palette_path.exists():
+        # No theme, no existing palette — seed with default
         bundled = Path(__file__).parent / "default_palette.toml"
         palette_path.write_text(bundled.read_text())
 
@@ -341,6 +346,28 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="cursor-shake detection: 'off' to disable, or an integer sensitivity "
              "(number of reversals needed, default 5; higher = harder to trigger)",
+    )
+    parser.add_argument(
+        "--theme",
+        metavar="NAME",
+        default=None,
+        help="apply a named color theme (persisted for future runs)",
+    )
+    parser.add_argument(
+        "--themes",
+        action="store_true",
+        help="browse available themes interactively",
+    )
+    parser.add_argument(
+        "--theme-import",
+        metavar="PATH",
+        default=None,
+        help="import a color scheme JSON theme (file path or URL)",
+    )
+    parser.add_argument(
+        "--theme-reset",
+        action="store_true",
+        help="reset to default theme (Tokyo Night)",
     )
     parser.add_argument(
         "command",
@@ -416,6 +443,87 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 1
 
+    # --theme-reset
+    if args.theme_reset:
+        from clippy.themes import set_active_theme_name, default_theme, theme_to_palette_toml
+        set_active_theme_name(None)
+        # Regenerate palette to default
+        cache = Path.home() / ".cache" / "clippys-revenge"
+        cache.mkdir(parents=True, exist_ok=True)
+        (cache / "palette.toml").write_text(
+            theme_to_palette_toml(default_theme())
+        )
+        _print_clippy_message(
+            "It looks like you're trying to reset your theme!",
+            ["Theme reset to Tokyo Night (default)."],
+            file=sys.stdout,
+        )
+        return 0
+
+    # --theme-import
+    if args.theme_import:
+        from clippy.themes import (
+            apply_theme,
+            import_theme_from_file,
+            import_theme_from_url,
+        )
+        source = args.theme_import
+        try:
+            if source.startswith("http://") or source.startswith("https://"):
+                theme_obj = import_theme_from_url(source)
+            else:
+                theme_obj = import_theme_from_file(source)
+        except Exception as e:
+            _print_clippy_message(
+                "It looks like you're trying to import a theme!",
+                [f"Failed to import theme: {e}"],
+            )
+            return 1
+        apply_theme(theme_obj)
+        _print_clippy_message(
+            "It looks like you're trying to import a theme!",
+            [f"Imported and applied: {theme_obj.name}"],
+            file=sys.stdout,
+        )
+        return 0
+
+    # --themes (interactive browser)
+    if args.themes:
+        from clippy.theme_browser import browse_themes
+        browse_themes()
+        return 0
+
+    # Resolve active theme (from --theme flag or persisted choice)
+    active_theme = None
+    demo_theme = None
+    if args.theme:
+        from clippy.themes import find_theme, apply_theme
+        active_theme = find_theme(args.theme)
+        if active_theme is None:
+            from clippy.themes import load_all_themes
+            available = [t.name for t in load_all_themes()]
+            # Case-insensitive substring matches
+            matches = [n for n in available if args.theme.lower() in n.lower()]
+            body = [f"Unknown theme: {args.theme}"]
+            if matches:
+                body += ["", "Did you mean:"]
+                body += [f"  {n}" for n in matches[:10]]
+            else:
+                body += ["", "Use --themes to browse available themes."]
+            _print_clippy_message(
+                "It looks like you're trying to pick a theme!",
+                body,
+            )
+            return 1
+        apply_theme(active_theme)
+    else:
+        from clippy.themes import get_active_theme
+        active_theme = get_active_theme()
+
+    if active_theme is not None:
+        from clippy.themes import theme_to_demo_theme
+        demo_theme = theme_to_demo_theme(active_theme)
+
     # --demo (all effects allowed, including overlays)
     if args.demo:
         if args.demo not in effects:
@@ -451,7 +559,11 @@ def main(argv: list[str] | None = None) -> int:
 
         from clippy.demo import demo_run
         try:
-            demo_run(effect, cols, rows, toast=toast, toast_is_native=using_native)
+            demo_run(
+                effect, cols, rows,
+                toast=toast, toast_is_native=using_native,
+                theme=demo_theme,
+            )
         except KeyboardInterrupt:
             pass
         return 0
@@ -535,6 +647,7 @@ def main(argv: list[str] | None = None) -> int:
     config_path = generate_config(
         effect_paths=[runner_path],
         shell_cmd=shell_cmd,
+        theme=active_theme,
     )
 
     _show_startup(selected_names, selectable, using_native, no_toast)

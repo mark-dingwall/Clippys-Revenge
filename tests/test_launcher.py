@@ -387,6 +387,102 @@ class TestMain:
         assert "maturin" in err
 
 
+# ---------------------------------------------------------------------------
+# Theme CLI flags
+# ---------------------------------------------------------------------------
+
+class TestThemeCLI:
+    def test_theme_reset(self, capsys, tmp_path):
+        with mock.patch("clippy.themes._cache_dir", return_value=tmp_path):
+            result = main(["--theme-reset"])
+        assert result == 0
+        out = capsys.readouterr().out
+        assert "Tokyo Night" in out
+
+    def test_theme_apply_known(self):
+        with mock.patch("clippy.themes.find_theme") as mock_find, \
+             mock.patch("clippy.themes.apply_theme") as mock_apply, \
+             mock.patch("clippy.demo.demo_run"):
+            from clippy.themes import default_theme
+            mock_find.return_value = default_theme()
+            result = main(["--theme", "Tokyo Night", "--demo", "fire"])
+        assert result == 0
+        mock_apply.assert_called_once()
+
+    def test_theme_unknown(self, capsys):
+        with mock.patch("clippy.themes.find_theme", return_value=None), \
+             mock.patch("clippy.themes.load_all_themes", return_value=[]):
+            result = main(["--theme", "nonexistent"])
+        assert result == 1
+        err = capsys.readouterr().err
+        assert "Unknown theme" in err
+
+    def test_theme_import_file(self, capsys, tmp_path):
+        import json
+        data = {
+            "name": "Test Import",
+            "background": "#000000", "foreground": "#FFFFFF",
+            "black": "#000000", "red": "#FF0000", "green": "#00FF00",
+            "yellow": "#FFFF00", "blue": "#0000FF", "purple": "#800080",
+            "cyan": "#00FFFF", "white": "#C0C0C0",
+            "brightBlack": "#808080", "brightRed": "#FF8080",
+            "brightGreen": "#80FF80", "brightYellow": "#FFFF80",
+            "brightBlue": "#8080FF", "brightPurple": "#FF80FF",
+            "brightCyan": "#80FFFF", "brightWhite": "#FFFFFF",
+        }
+        theme_file = tmp_path / "custom.json"
+        theme_file.write_text(json.dumps(data))
+        with mock.patch("clippy.themes._themes_dir", return_value=tmp_path / "themes"), \
+             mock.patch("clippy.themes._cache_dir", return_value=tmp_path):
+            result = main(["--theme-import", str(theme_file)])
+        assert result == 0
+        out = capsys.readouterr().out
+        assert "Test Import" in out
+
+    def test_theme_import_bad_file(self, capsys, tmp_path):
+        bad_file = tmp_path / "bad.json"
+        bad_file.write_text("not valid json")
+        result = main(["--theme-import", str(bad_file)])
+        assert result == 1
+        err = capsys.readouterr().err
+        assert "Failed to import" in err
+
+    def test_themes_flag(self):
+        with mock.patch("clippy.theme_browser.browse_themes") as mock_browse:
+            result = main(["--themes"])
+        assert result == 0
+        mock_browse.assert_called_once()
+
+    def test_demo_with_theme_passes_demo_theme(self):
+        with mock.patch("clippy.themes.find_theme") as mock_find, \
+             mock.patch("clippy.themes.apply_theme"), \
+             mock.patch("clippy.demo.demo_run") as mock_demo:
+            from clippy.themes import default_theme
+            mock_find.return_value = default_theme()
+            main(["--theme", "Tokyo Night", "--demo", "fire"])
+        # demo_run should receive a theme keyword arg
+        _, kwargs = mock_demo.call_args
+        assert kwargs.get("theme") is not None
+
+
+class TestGenerateConfigTheme:
+    def test_theme_regenerates_palette(self, tmp_path):
+        """When a theme is provided, palette is always regenerated."""
+        from clippy.themes import default_theme
+        # Pre-create a palette
+        (tmp_path / "palette.toml").write_text("old content\n")
+        generate_config(["/path/to/fire.py"], config_dir=str(tmp_path), theme=default_theme())
+        content = (tmp_path / "palette.toml").read_text()
+        assert content != "old content\n"
+        assert "foreground" in content
+
+    def test_no_theme_preserves_existing_palette(self, tmp_path):
+        """Without a theme, existing palette is not touched."""
+        (tmp_path / "palette.toml").write_text("custom = [1, 2, 3]\n")
+        generate_config(["/path/to/fire.py"], config_dir=str(tmp_path))
+        assert (tmp_path / "palette.toml").read_text() == "custom = [1, 2, 3]\n"
+
+
 class TestGenerateConfigSinglePlugin:
     def test_single_plugin_block(self, tmp_path):
         config_dir = generate_config(
