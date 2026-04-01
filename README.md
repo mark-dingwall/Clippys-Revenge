@@ -78,6 +78,31 @@ clippy --demo paperclips
 
 **Mascot**: Clippy watches from the corner with open contempt. Breaking your flow and ruining your productivity is the only thing that brings joy to his cold, calloused heart.
 
+## Themes
+
+Clippy ships with 35 curated color themes and supports importing any theme in the standard terminal color scheme JSON format (as used by [iTerm2-Color-Schemes](https://github.com/mbadolato/iTerm2-Color-Schemes) and many terminal emulators).
+
+```bash
+# Browse themes interactively (TUI with arrow keys, search, color swatches)
+clippy --themes
+
+# Apply a theme by name (case-insensitive, persisted across runs)
+clippy --theme dracula
+
+# Import a theme from a local JSON file
+clippy --theme-import ~/Downloads/my-theme.json
+
+# Import from a URL (e.g. the iTerm2-Color-Schemes repo)
+clippy --theme-import https://raw.githubusercontent.com/mbadolato/iTerm2-Color-Schemes/master/windowsterminal/Argonaut.json
+
+# Reset to default (Tokyo Night)
+clippy --theme-reset
+```
+
+Themes affect the tattoy terminal palette (ANSI colors 0-15, foreground, background) and the `--demo` mode IDE appearance (syntax highlighting, editor chrome). Effect-specific colors (fire gradients, alien sprites, etc.) are not themed.
+
+**Bundled themes include:** Tokyo Night, Dracula, Catppuccin (Mocha/Latte/Frappe/Macchiato), Nord, Gruvbox Dark/Light, Solarized Dark/Light, One Dark/Light, Monokai, Rose Pine (+ Moon/Dawn), Kanagawa, Material Dark, Ayu Dark/Light, Everforest Dark/Light, GitHub Dark/Light, Tomorrow Night, Nightfox, Palenight, Tokyonight Storm, Zenburn, Synthwave 84, Horizon Dark, Cobalt2, Poimandres, and Snazzy.
+
 ## Controlling Clippy
 
 Clippy cycles through effects on a timer (default 5 minutes, configurable via `CLIPPY_INTERVAL`). You can alter this by quickly shaking your cursor left and right (e.g. spamming the left/right arrows):

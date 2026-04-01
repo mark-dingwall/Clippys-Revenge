@@ -39,6 +39,12 @@ python3 -m clippy.launcher --optimised on
 # List effects
 python3 -m clippy.launcher --list
 
+# Theme commands
+python3 -m clippy.launcher --themes              # Browse themes interactively
+python3 -m clippy.launcher --theme dracula        # Apply a named theme
+python3 -m clippy.launcher --theme-import path.json  # Import a color scheme JSON theme
+python3 -m clippy.launcher --theme-reset          # Reset to default (Tokyo Night)
+
 # Build optional Rust acceleration module
 pip install maturin
 cd native && maturin develop --release
@@ -68,8 +74,11 @@ User runs `clippy` CLI
 - `clippy/effects/` — Individual effect plugins. Each has `EFFECT_META` dict, `cancel()` method, `is_done` property, and `if __name__ == "__main__": run(Effect())`.
 - `clippy/effects/mascot.py` — Standalone mascot overlay (used only for `--demo mascot`; has its own `CursorShakeDetector`). In tattoy mode, mascot rendering is handled by `UnifiedEffect`.
 - `clippy/noise.py` — Pure Python 3D simplex noise (`noise3(x, y, z) -> float in [-1.0, 1.0]`). Used by fire for flow fields. No dependencies.
-- `clippy/launcher.py` — CLI entry point. Discovers effects, generates tattoy config, execs tattoy. Uses `unified_runner.py` as the single plugin entry point (no separate mascot plugin).
-- `clippy/demo.py` — ANSI terminal renderer for `--demo` mode (no tattoy required).
+- `clippy/themes.py` — Theme system: `Theme` dataclass (18 named RGB colors in standard terminal color scheme format), `DemoTheme` dataclass (ANSI escape strings for demo-mode IDE rendering), color scheme JSON parsing (`parse_theme_json()`), palette TOML generation (`theme_to_palette_toml()`), demo theme derivation (`theme_to_demo_theme()`), persistence (`get_active_theme()` / `set_active_theme_name()` via `~/.cache/clippys-revenge/theme.json`), bundled theme loading, user theme import (file or URL via `urllib.request`). `default_demo_theme()` returns the original hardcoded VS Code dark+ colors for backward compatibility.
+- `clippy/theme_browser.py` — Interactive TUI theme browser using alternate screen buffer and raw terminal input (`tty`/`termios`). Arrow keys navigate, `/` enters search mode (substring filter), Enter selects and applies, `q`/Escape quits. Falls back to simple numbered list when raw terminal is unavailable (piped stdin, dumb terminal). **Important:** All TUI output uses `\r\n` (not bare `\n`) because raw terminal mode disables the kernel's LF→CRLF translation.
+- `clippy/themes_data.json` — 35 curated themes in standard terminal color scheme JSON format (Tokyo Night, Dracula, Catppuccin x4, Nord, Gruvbox x2, Solarized x2, One Dark/Light, Monokai, Rose Pine x3, Kanagawa, Material, Ayu x2, Everforest x2, GitHub x2, Tomorrow Night, Nightfox, Palenight, Tokyonight Storm, Zenburn, Synthwave 84, Horizon Dark, Cobalt2, Poimandres, Snazzy).
+- `clippy/launcher.py` — CLI entry point. Discovers effects, generates tattoy config, execs tattoy. Uses `unified_runner.py` as the single plugin entry point (no separate mascot plugin). Supports `--theme NAME`, `--themes`, `--theme-import PATH`, `--theme-reset` flags.
+- `clippy/demo.py` — ANSI terminal renderer for `--demo` mode (no tattoy required). Accepts an optional `DemoTheme` parameter; defaults to `default_demo_theme()` when no theme is active.
 - `clippy/ide_template.py` — Generates a fake VS Code-style Python editor background for `--demo` mode. Effects render on top, visually destroying the code.
 - `bin/clippy` — Shell wrapper that sets `PYTHONPATH` and execs `python3 -m clippy.launcher`.
 - `install.sh` / `uninstall.sh` — Install to `~/.local/share/clippys-revenge`, symlink `bin/clippy` to `~/.local/bin/clippy`.
@@ -112,6 +121,9 @@ The golden files in `tests/golden/` are the source of truth for wire format.
 - `CLIPPY_NO_TOAST` env var (`1`/`true`/`yes`) suppresses the startup mode toast
 - `CLIPPY_SHAKE` env var — `off` to disable cursor-shake detection, or a positive integer to set reversal threshold (default `5`)
 - Launcher auto-detects Rust toolchain and builds `clippy_native` on first run if `cargo` is available
+- Active theme persisted in `~/.cache/clippys-revenge/theme.json`; user-imported themes stored in `~/.cache/clippys-revenge/themes/*.json`
+- Theme palette written to `~/.cache/clippys-revenge/palette.toml` (258 entries: ANSI 0-15 from theme, 16-231 standard xterm 6x6x6 cube, 232-255 standard grayscale, plus foreground/background)
+- `default_palette.toml` is generated from `default_theme()` — to update it, run `theme_to_palette_toml(default_theme())` and write the output
 
 ## Testing Patterns
 
@@ -127,6 +139,9 @@ The golden files in `tests/golden/` are the source of truth for wire format.
   - Microbes: `IDLE → SWARMING → FADING → DONE` (`cancel()` skips to FADING)
   - Paperclips: `IDLE → SEEDING → REPLICATING → FILLING → EARTH_TRANSITION → EARTH_REPLICATING → FADING → DONE` (`cancel()` skips to FADING)
   - Mascot: standalone only (`--demo mascot`): `WATCHING → IMMINENT_EARLY → IMMINENT_DEEP → CACKLING → DONE` (demo) or loop (live). Has own `CursorShakeDetector`.
+- **Theme round-trip test:** `default_theme()` → `theme_to_palette_toml()` must match `default_palette.toml` byte-for-byte.
+- **Demo backward compatibility:** All existing `test_demo.py` tests pass without a theme parameter — `demo_run()` defaults to `default_demo_theme()`.
+- **TUI browser tests:** Mock `tty.setraw`, `termios.tcgetattr`/`tcsetattr`, `sys.stdin.read`, and `os.get_terminal_size` to test the full TUI interaction loop including key navigation, search filtering, and theme selection. Verify all output uses `\r\n` (not bare `\n`) for raw mode correctness.
 
 ## Mocking Quick Reference
 
@@ -140,4 +155,7 @@ The golden files in `tests/golden/` are the source of truth for wire format.
 | `time.monotonic` | `clock=fake_clock.now` injection | Deterministic tick timing |
 | `random.Random` | `rng=Random(42)` injection | Reproducible effect output |
 | `os.environ` | `monkeypatch.setenv` | Control `PATH`, `SHELL` |
+| `clippy.themes._cache_dir` | `mock.patch` return `tmp_path` | Isolate theme persistence |
+| `clippy.themes._themes_dir` | `mock.patch` return `tmp_path` | Isolate user theme storage |
+| `tty.setraw` / `termios.*` | `mock.patch` | Test TUI browser without real terminal |
 
