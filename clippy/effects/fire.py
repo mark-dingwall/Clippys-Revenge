@@ -171,14 +171,23 @@ def heat_to_char(heat: float) -> str:
     return " "
 
 
-def _dim_color(c: Color, factor: float) -> Color:
-    """Dim a color by a factor, preserving alpha."""
-    return (c[0] * factor, c[1] * factor, c[2] * factor, c[3])
+try:
+    from clippy_native import compute_heat as _native_compute_heat
+    _HAS_NATIVE_HEAT = True
+except ImportError:
+    _native_compute_heat = None
+    _HAS_NATIVE_HEAT = False
 
+try:
+    from clippy_native import tint_color as _dim_color, fade_color as _fade_color
+except ImportError:
+    def _dim_color(c: Color, factor: float) -> Color:  # type: ignore[misc]
+        """Dim a color by a factor, preserving alpha."""
+        return (c[0] * factor, c[1] * factor, c[2] * factor, c[3])
 
-def _fade_color(c: Color, alpha: float) -> Color:
-    """Adjust the alpha of a color."""
-    return (c[0], c[1], c[2], c[3] * alpha)
+    def _fade_color(c: Color, alpha: float) -> Color:  # type: ignore[misc]
+        """Adjust the alpha of a color."""
+        return (c[0], c[1], c[2], c[3] * alpha)
 
 
 # ---------------------------------------------------------------------------
@@ -634,6 +643,9 @@ class FireEffect:
         values from the main RNG.  Tracks hot cells via a bool grid + list
         (avoids per-cell tuple hashing).
         """
+        if _HAS_NATIVE_HEAT and self._burning_positions:
+            return self._compute_heat_native()
+
         heat = self._heat
         w = self._width
         is_hot = self._is_hot
@@ -720,6 +732,67 @@ class FireEffect:
                     any_heat = True
             if not any_heat:
                 break
+
+        self._hot_list = hot_list
+        self._shimmer_cells = shimmer
+
+    def _compute_heat_native(self) -> None:
+        """Native Rust implementation of _compute_heat."""
+        w = self._width
+        h = self._height
+
+        # Flatten 2D grids to 1D
+        heat_flat = [self._heat[y][x] for y in range(h) for x in range(w)]
+        is_hot_flat = [self._is_hot[y][x] for y in range(h) for x in range(w)]
+        ignition_flat = [self._ignition_tick[y][x] for y in range(h) for x in range(w)]
+        state_flat = [self._cell_state[y][x] for y in range(h) for x in range(w)]
+
+        burning = list(self._burning_positions)
+
+        # Compute bounding box
+        min_x = w
+        max_x = 0
+        min_y = h
+        max_y = 0
+        for x, y in burning:
+            if x < min_x:
+                min_x = x
+            if x > max_x:
+                max_x = x
+            if y < min_y:
+                min_y = y
+            if y > max_y:
+                max_y = y
+
+        # Pre-generate random values matching the Python RNG sequence
+        margin = 15
+        col_lo = max(0, min_x - margin) & ~1
+        col_hi = min(w, max_x + margin + 1)
+        n_rows = max(0, max_y - 1 - max(0, min_y - margin) + 1)
+        n_even_cols = max(0, (col_hi - col_lo + 1) // 2)
+        n_randoms = n_rows * n_even_cols
+
+        heat_rng = self._heat_rng
+        heat_rng.seed(self._tick_count)
+        drift_vals = [heat_rng.randint(-1, 1) for _ in range(n_randoms)]
+        decay_vals = [heat_rng.random() * HEAT_DECAY_MAX for _ in range(n_randoms)]
+
+        heat_flat, is_hot_flat, hot_list, shimmer = _native_compute_heat(
+            heat_flat, is_hot_flat,
+            self._hot_list, burning,
+            ignition_flat, state_flat,
+            self._tick_count, w, h,
+            BURN_DURATION, HEAT_DECAY_MAX,
+            drift_vals, decay_vals,
+            min_x, max_x, min_y, max_y,
+        )
+
+        # Unflatten back to 2D
+        for y in range(h):
+            row_offset = y * w
+            for x in range(w):
+                self._heat[y][x] = heat_flat[row_offset + x]
+                self._is_hot[y][x] = is_hot_flat[row_offset + x]
 
         self._hot_list = hot_list
         self._shimmer_cells = shimmer

@@ -15,6 +15,12 @@ from enum import IntEnum
 from clippy.harness import run
 from clippy.types import Cell, Color, OutputCells, OutputMessage, PTYUpdate, TTYResize
 
+try:
+    from clippy_native import tint_color as _tint_impl
+except ImportError:
+    def _tint_impl(color: Color, alpha: float) -> Color:  # type: ignore[misc]
+        return (color[0] * alpha, color[1] * alpha, color[2] * alpha, color[3])
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -438,7 +444,7 @@ class InvadersEffect:
         This keeps the cell fully opaque so tattoy doesn't blend it with
         the live terminal content underneath the overlay.
         """
-        return (color[0] * alpha, color[1] * alpha, color[2] * alpha, color[3])
+        return _tint_impl(color, alpha)
 
     # -- Bombardment simulation -----------------------------------------------
 

@@ -6,9 +6,22 @@ JSON serialization/deserialization matching tattoy's wire format.
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 
 Color = tuple[float, float, float, float]  # RGBA, 0.0-1.0
+
+_CLIPPY_FORCE_PYTHON = os.environ.get("CLIPPY_FORCE_PYTHON", "").lower() in ("1", "true", "yes")
+
+try:
+    if not _CLIPPY_FORCE_PYTHON:
+        from clippy_native import serialize_cells as _native_serialize_cells
+        from clippy_native import serialize_pixels as _native_serialize_pixels
+    else:
+        raise ImportError("forced")
+except ImportError:
+    _native_serialize_cells = None  # type: ignore[assignment]
+    _native_serialize_pixels = None  # type: ignore[assignment]
 
 # JSON escape for cell characters — most are single printable chars
 _JSON_ESCAPE = {'"': '\\"', '\\': '\\\\', '\n': '\\n', '\r': '\\r', '\t': '\\t'}
@@ -95,6 +108,8 @@ class OutputCells:
     cells: list[Cell]
 
     def to_json(self) -> str:
+        if _native_serialize_cells is not None:
+            return _native_serialize_cells(self.cells)
         parts: list[str] = []
         cc = _color_cache
         ct = _CHAR_TABLE
@@ -132,6 +147,8 @@ class OutputPixels:
     pixels: list[Pixel]
 
     def to_json(self) -> str:
+        if _native_serialize_pixels is not None:
+            return _native_serialize_pixels(self.pixels)
         parts: list[str] = []
         cc = _color_cache
         for p in self.pixels:
@@ -155,12 +172,27 @@ OutputMessage = OutputText | OutputCells | OutputPixels
 
 
 class CursorShakeDetector:
-    """Detects rapid left-right cursor shake: 5 x-axis reversals within 2 seconds."""
+    """Detects rapid left-right cursor shake: N x-axis reversals within 2 seconds.
+
+    Sensitivity is controlled by ``CLIPPY_SHAKE`` env var:
+      - ``off``  — disable detection entirely (update() always returns False)
+      - integer  — number of reversals required (default 5, higher = harder to trigger)
+    """
 
     WINDOW_TICKS = 60   # 2s at 30fps
-    REVERSALS_NEEDED = 5
+    DEFAULT_REVERSALS = 5
 
     def __init__(self) -> None:
+        raw = os.environ.get("CLIPPY_SHAKE", "")
+        if raw.lower() == "off":
+            self._disabled = True
+            self.reversals_needed = self.DEFAULT_REVERSALS
+        elif raw.isdigit() and int(raw) > 0:
+            self._disabled = False
+            self.reversals_needed = int(raw)
+        else:
+            self._disabled = False
+            self.reversals_needed = self.DEFAULT_REVERSALS
         self._last_x: int | None = None
         self._last_x_dir: int = 0          # +1 or -1, last non-zero dx direction
         self._reversal_ticks: list[int] = []  # tick numbers of each reversal
@@ -168,6 +200,8 @@ class CursorShakeDetector:
 
     def update(self, pos: tuple[int, int]) -> bool:
         """Record cursor position, return True if shake gesture completed."""
+        if self._disabled:
+            return False
         self._tick += 1
         x = pos[0]
 
@@ -185,7 +219,7 @@ class CursorShakeDetector:
         cutoff = self._tick - self.WINDOW_TICKS
         self._reversal_ticks = [t for t in self._reversal_ticks if t > cutoff]
 
-        if len(self._reversal_ticks) >= self.REVERSALS_NEEDED:
+        if len(self._reversal_ticks) >= self.reversals_needed:
             self._reversal_ticks.clear()
             self._last_x = None
             self._last_x_dir = 0

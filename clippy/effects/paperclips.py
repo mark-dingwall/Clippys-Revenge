@@ -17,6 +17,12 @@ from enum import IntEnum
 from clippy.harness import run
 from clippy.types import Cell, Color, OutputCells, OutputMessage, PTYUpdate, TTYResize
 
+try:
+    from clippy_native import tint_color as _tint_impl
+except ImportError:
+    def _tint_impl(color: Color, alpha: float) -> Color:  # type: ignore[misc]
+        return (color[0] * alpha, color[1] * alpha, color[2] * alpha, color[3])
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -526,13 +532,20 @@ class PaperclipsEffect:
                 if ch != " ":
                     art_chars[(col, row)] = ch
 
-        # Pass 2: mark outline — adjacent to void
+        # Pass 2: mark outline — adjacent to void (8-directional so diagonal
+        # exposure at the tropics doesn't leave green edge chars)
         outline_positions: set[tuple[int, int]] = set()
         for (col, row) in art_chars:
-            for dc, dr in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
-                if (col + dc, row + dr) not in art_chars:
-                    outline_positions.add((col, row))
-                    break
+            for dc in (-1, 0, 1):
+                for dr in (-1, 0, 1):
+                    if dc == 0 and dr == 0:
+                        continue
+                    if (col + dc, row + dr) not in art_chars:
+                        outline_positions.add((col, row))
+                        break
+                else:
+                    continue
+                break
 
         # Pass 3: classify and map to screen coordinates
         result: dict[tuple[int, int], tuple[str, Color]] = {}
@@ -634,7 +647,7 @@ class PaperclipsEffect:
         This keeps the cell fully opaque so tattoy doesn't blend it with
         the live terminal content underneath the overlay.
         """
-        return (color[0] * alpha, color[1] * alpha, color[2] * alpha, color[3])
+        return _tint_impl(color, alpha)
 
     # -- Growth algorithm -----------------------------------------------------
 

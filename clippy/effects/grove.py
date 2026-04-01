@@ -11,6 +11,12 @@ from enum import IntEnum
 from clippy.harness import run
 from clippy.types import Cell, Color, OutputCells, OutputMessage, PTYUpdate, TTYResize
 
+try:
+    from clippy_native import fade_color as _fade_color_impl
+except ImportError:
+    def _fade_color_impl(c: Color, alpha: float) -> Color:  # type: ignore[misc]
+        return (c[0], c[1], c[2], c[3] * alpha)
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -1182,7 +1188,7 @@ class GroveEffect:
         return 1.0
 
     def _fade_color(self, c: Color, alpha: float) -> Color:
-        return (c[0], c[1], c[2], c[3] * alpha)
+        return _fade_color_impl(c, alpha)
 
     def _render_static_vegetation(self, buf: dict[tuple[int, int], Cell],
                                    w: int, h: int, fade_alpha: float) -> None:

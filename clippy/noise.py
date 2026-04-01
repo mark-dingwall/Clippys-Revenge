@@ -41,7 +41,7 @@ def _dot3(g: tuple[int, int, int], x: float, y: float, z: float) -> float:
     return g[0] * x + g[1] * y + g[2] * z
 
 
-def noise3(x: float, y: float, z: float) -> float:
+def _noise3_python(x: float, y: float, z: float) -> float:
     """3D simplex noise. Returns a value in [-1.0, 1.0]."""
     # Skew input space to simplex cell
     s = (x + y + z) * _F3
@@ -124,3 +124,9 @@ def noise3(x: float, y: float, z: float) -> float:
 
     # Scale to [-1, 1]
     return 32.0 * (n0 + n1 + n2 + n3)
+
+
+try:
+    from clippy_native import noise3
+except ImportError:
+    noise3 = _noise3_python
