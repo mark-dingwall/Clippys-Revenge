@@ -11,6 +11,7 @@ import threading
 import time
 
 from clippy.ide_template import build_template
+from clippy.themes import DemoTheme, default_demo_theme
 from clippy.types import Cell, Color, OutputCells, OutputMessage, OutputPixels, OutputText
 
 # ---------------------------------------------------------------------------
@@ -90,16 +91,6 @@ def render_frame(outputs: list[OutputMessage], writer, flush) -> None:
 # IDE template renderer
 # ---------------------------------------------------------------------------
 
-# Dark VS-Code-like palette
-_IDE_BG  = "\033[48;2;24;24;36m"   # near-black navy background
-_IDE_FG  = "\033[38;2;106;118;142m" # muted blue-gray code text
-_BAR_BG  = "\033[48;2;37;37;52m"   # slightly lighter for title/tab bars
-_STAT_BG = "\033[48;2;0;100;160m"  # VS Code blue status bar
-_STAT_FG = "\033[38;2;220;230;240m" # light text on status bar
-_TERM_BG = "\033[48;2;20;20;30m"   # terminal panel (darkest)
-_SEP_FG  = "\033[38;2;60;65;80m"   # dim separator │ and ─ lines
-
-
 # ---------------------------------------------------------------------------
 # Python syntax highlighting
 # ---------------------------------------------------------------------------
@@ -112,13 +103,6 @@ _KEYWORDS = frozenset([
     "try", "while", "with", "yield",
 ])
 
-_KW_FG   = "\033[38;2;197;134;192m"   # purple
-_STR_FG  = "\033[38;2;206;145;120m"   # orange
-_CMT_FG  = "\033[38;2;106;153;85m"    # green
-_FUNC_FG = "\033[38;2;220;220;170m"   # yellow (name after def/class)
-_NUM_FG  = "\033[38;2;181;206;168m"   # light green
-_CODE_FG = "\033[38;2;212;212;212m"   # light gray (default)
-
 _TOKEN_RE = re.compile(
     r'(\"\"\"[\s\S]*?\"\"\"|\'\'\'[\s\S]*?\'\'\')'  # triple-quoted strings
     r'|(\"[^\"\\]*(?:\\.[^\"\\]*)*\"|\'[^\'\\]*(?:\\.[^\'\\]*)*\')'  # strings
@@ -129,28 +113,28 @@ _TOKEN_RE = re.compile(
 )
 
 
-def _highlight_python(s: str) -> str:
-    """Apply VS Code dark+ syntax colors to a Python source line."""
-    result = [_CODE_FG]
+def _highlight_python(s: str, theme: DemoTheme) -> str:
+    """Apply syntax colors to a Python source line using the given theme."""
+    result = [theme.code_fg]
     prev_kw = ""
     for m in _TOKEN_RE.finditer(s):
         triple, string, comment, number, ident, other = m.groups()
         tok = m.group()
         if triple is not None or string is not None:
-            result.append(_STR_FG + tok + _CODE_FG)
+            result.append(theme.str_fg + tok + theme.code_fg)
             prev_kw = ""
         elif comment is not None:
-            result.append(_CMT_FG + tok)
+            result.append(theme.cmt_fg + tok)
             break  # rest of line is a comment
         elif number is not None:
-            result.append(_NUM_FG + tok + _CODE_FG)
+            result.append(theme.num_fg + tok + theme.code_fg)
             prev_kw = ""
         elif ident is not None:
             if tok in _KEYWORDS:
-                result.append(_KW_FG + tok + _CODE_FG)
+                result.append(theme.kw_fg + tok + theme.code_fg)
                 prev_kw = tok
             elif prev_kw in ("def", "class"):
-                result.append(_FUNC_FG + tok + _CODE_FG)
+                result.append(theme.func_fg + tok + theme.code_fg)
                 prev_kw = ""
             else:
                 result.append(tok)
@@ -172,20 +156,20 @@ def _render_toast(msg: str, width: int, is_native: bool, writer) -> None:
     writer(move_to(0, 0) + bg + fg + padded + RESET)
 
 
-def _render_ide_template(width: int, height: int, writer) -> None:
+def _render_ide_template(width: int, height: int, writer, theme: DemoTheme) -> None:
     """Write the fake IDE background to the terminal (no flush)."""
     rows = build_template(width, height)
     for y, row in enumerate(rows):
         if y == 0:
-            writer(move_to(0, y) + _BAR_BG + _IDE_FG + row + RESET)  # title bar
+            writer(move_to(0, y) + theme.bar_bg + theme.ide_fg + row + RESET)
         elif y == 1:
-            writer(move_to(0, y) + _BAR_BG + _IDE_FG + row + RESET)  # tab bar
+            writer(move_to(0, y) + theme.bar_bg + theme.ide_fg + row + RESET)
         elif y == height - 1:
-            writer(move_to(0, y) + _STAT_BG + _STAT_FG + row + RESET)  # status bar
+            writer(move_to(0, y) + theme.stat_bg + theme.stat_fg + row + RESET)
         elif y >= height - 4:
-            writer(move_to(0, y) + _TERM_BG + _IDE_FG + row + RESET)  # terminal panel
+            writer(move_to(0, y) + theme.term_bg + theme.ide_fg + row + RESET)
         else:
-            writer(move_to(0, y) + _IDE_BG + _highlight_python(row) + RESET)  # editor
+            writer(move_to(0, y) + theme.ide_bg + _highlight_python(row, theme) + RESET)
 
 
 # ---------------------------------------------------------------------------
@@ -204,11 +188,14 @@ def demo_run(
     flush=None,
     toast: str | None = None,
     toast_is_native: bool = False,
+    theme: DemoTheme | None = None,
 ) -> None:
     """Run an effect in demo mode, rendering directly to terminal.
 
     All keyword args after height are testability seams.
     """
+    if theme is None:
+        theme = default_demo_theme()
     if clock is None:
         clock = time.monotonic
     if writer is None:
@@ -240,7 +227,7 @@ def demo_run(
     writer(ALT_SCREEN_ON)
     writer(HIDE_CURSOR)
     writer(CLEAR)
-    _render_ide_template(width, height, writer)
+    _render_ide_template(width, height, writer, theme)
     if toast:
         _render_toast(toast, width, toast_is_native, writer)
     flush()
@@ -260,7 +247,7 @@ def demo_run(
                     flush()
                 elif frame_count == toast_frames + 1:
                     # Restore title bar underneath
-                    writer(move_to(0, 0) + _BAR_BG + _IDE_FG + rows[0] + RESET)
+                    writer(move_to(0, 0) + theme.bar_bg + theme.ide_fg + rows[0] + RESET)
                     flush()
 
             # Stop if effect declares itself done
