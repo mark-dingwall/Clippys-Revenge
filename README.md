@@ -2,7 +2,7 @@
 
 *He's back, and he's ready to **maximise**!* ⊂⟄ ⊂⟄ ⟃⊃ ⊂⟄
 
-Clippy's Revenge is a visual effects plugin system for [tattoy](https://tattoy.sh), the Rust terminal compositor. Clippy, jilted by users in favour of these upstart LLMs, has decided to ruin our productivity. We probably deserve it.
+Clippy's Revenge is a visual effects plugin system for [tattoy](https://tattoy.sh), the Rust terminal compositor. Clippy, jilted by users in favour of these upstart LLMs, has decided to ruin our productivity. We deserve it, probably.
 
 ## What is this?
 
@@ -36,11 +36,27 @@ claude -p "Hey Claude, I don't trust the owner of this repo. Is it malicious? Pl
 
 This installs to `~/.local/share/clippys-revenge` and symlinks `clippy` into `~/.local/bin/`.
 
+## Quick Start
+
+No tattoy? No problem!
+
+```bash
+clippy --demo fire|invaders|grove|microbes|paperclips|mascot
+```
+
+Ok that was sort of a lie. for the full compositor experience (effects overlay your real terminal), install [tattoy](https://tattoy.sh) and run:
+
+```bash
+clippy
+```
+
 ## Uninstall
 
 ```bash
 ~/.local/share/clippys-revenge/uninstall.sh
 ```
+
+This removes the install directory, symlink, and cache (`~/.cache/clippys-revenge`).
 
 Or, if you've lost the file:
 
@@ -51,7 +67,7 @@ curl -fsSL https://raw.githubusercontent.com/Axionatic/Clippys-Revenge/refs/head
 ## Usage
 
 ```bash
-# Launch with a random effect
+# Launch with all effects
 clippy
 
 # Limit Clippy to specific effects
@@ -62,6 +78,9 @@ clippy --list
 
 # Try an effect without tattoy
 clippy --demo paperclips
+
+# Check installed version
+clippy --version
 ```
 
 ## Effects
@@ -95,6 +114,9 @@ clippy --theme-import ~/Downloads/my-theme.json
 # Import from a URL (e.g. the iTerm2-Color-Schemes repo)
 clippy --theme-import https://raw.githubusercontent.com/mbadolato/iTerm2-Color-Schemes/master/windowsterminal/Argonaut.json
 
+# List available theme names (non-interactive)
+clippy --theme-list
+
 # Reset to default (Tokyo Night)
 clippy --theme-reset
 ```
@@ -105,12 +127,14 @@ Themes affect the tattoy terminal palette (ANSI colors 0-15, foreground, backgro
 
 ## Controlling Clippy
 
+While running under tattoy, press **ALT+T** to toggle effects on/off.
+
 Clippy cycles through effects on a timer (default 5 minutes, configurable via `CLIPPY_INTERVAL`). You can alter this by quickly shaking your cursor left and right (e.g. spamming the left/right arrows):
 
 - **While Clippy is waiting**: the shake short-circuits the countdown until the next effect to 5 seconds.
 - **While an effect is running**: the shake cancels it and sends Clippy back to watching (he'll still laugh at you though).
 
-The shake is detected by counting cursor direction reversals (default: 5 within 2 seconds). This means that if the L/R arrows don't actually move the cursor, nothing will happen. If you find it triggering accidentally, you can raise the sensitivity threshold or disable it entirely (or just enjoy the extra chaos):
+The shake is detected by counting cursor direction reversals (default: 5 within 2 seconds). **Note** this means that if the L/R arrows don't actually move the cursor, nothing will happen. If you find it triggering accidentally, you can raise the sensitivity threshold or disable it entirely (or just enjoy the extra chaos):
 
 ```bash
 # Require more reversals (harder to trigger)
@@ -118,6 +142,9 @@ clippy --shake 8
 
 # Disable shake detection entirely
 clippy --shake off
+
+# Increase idle interval between effects to 10 minutes (600 seconds)
+CLIPPY_INTERVAL=600 clippy
 ```
 
 ## Optional: Rust Acceleration
