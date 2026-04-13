@@ -38,15 +38,7 @@ for _i in range(128):
         _CHAR_TABLE.append(_ch)
 
 
-def _json_char(ch: str) -> str:
-    """Escape a character for embedding in a JSON string value."""
-    o = ord(ch)
-    if o < 128:
-        return _CHAR_TABLE[o]
-    return ch
-
-
-# Step 13: Dict-backed color string cache
+# Dict-backed color string cache
 _color_cache: dict[Color, str] = {}
 
 

@@ -170,10 +170,14 @@ class _SimpleEffect:
     def on_resize(self, resize):
         pass
 
+    @property
+    def is_done(self):
+        return self._done
+
     def tick(self):
         self.tick_count += 1
         if self.tick_count >= self.max_ticks:
-            raise KeyboardInterrupt
+            self._done = True
         return []
 
 
@@ -441,6 +445,7 @@ class TestDemoRun:
         fake_time = [0.0]
 
         class TimeAdvancingEffect:
+            is_done = False
             def on_pty_update(self, update):
                 pass
             def on_resize(self, resize):
@@ -449,7 +454,7 @@ class TestDemoRun:
                 # Simulate tick taking 0.01s
                 fake_time[0] += 0.01
                 if len(sleep_args) >= 2:
-                    raise KeyboardInterrupt
+                    self.is_done = True
                 return []
 
         def fake_sleep(timeout):

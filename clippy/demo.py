@@ -251,8 +251,7 @@ def demo_run(
                     flush()
 
             # Stop if effect declares itself done
-            phase = getattr(effect, "phase", None)
-            if phase is not None and getattr(phase, "name", None) == "DONE":
+            if effect.is_done:
                 break
 
             elapsed = clock() - frame_start
@@ -261,8 +260,9 @@ def demo_run(
                 sleep(remaining)
     except KeyboardInterrupt:
         pass
-    except Exception as e:
-        print(f"\nDemo error: {e}", file=sys.stderr)
+    except Exception:
+        import traceback
+        traceback.print_exc()
     finally:
         writer(SHOW_CURSOR)
         writer(ALT_SCREEN_OFF)
