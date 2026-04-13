@@ -11,8 +11,13 @@ from enum import IntEnum
 from clippy.harness import run
 from clippy.types import Cell, Color, OutputCells, OutputMessage, PTYUpdate, TTYResize
 
+_CLIPPY_FORCE_PYTHON = os.environ.get("CLIPPY_FORCE_PYTHON", "").lower() in ("1", "true", "yes")
+
 try:
-    from clippy_native import fade_color as _fade_color_impl
+    if not _CLIPPY_FORCE_PYTHON:
+        from clippy_native import fade_color as _fade_color_impl
+    else:
+        raise ImportError("forced")
 except ImportError:
     def _fade_color_impl(c: Color, alpha: float) -> Color:  # type: ignore[misc]
         return (c[0], c[1], c[2], c[3] * alpha)
@@ -543,6 +548,9 @@ class GroveEffect:
     def _init_scene(self) -> None:
         w = self._width
         h = self._height
+        if h < 3:
+            self._phase = Phase.DONE
+            return
         base_y = h - 1
 
         # Cap trunk max to terminal height

@@ -171,15 +171,23 @@ def heat_to_char(heat: float) -> str:
     return " "
 
 
+_CLIPPY_FORCE_PYTHON = os.environ.get("CLIPPY_FORCE_PYTHON", "").lower() in ("1", "true", "yes")
+
 try:
-    from clippy_native import compute_heat as _native_compute_heat
+    if not _CLIPPY_FORCE_PYTHON:
+        from clippy_native import compute_heat as _native_compute_heat
+    else:
+        raise ImportError("forced")
     _HAS_NATIVE_HEAT = True
 except ImportError:
     _native_compute_heat = None
     _HAS_NATIVE_HEAT = False
 
 try:
-    from clippy_native import tint_color as _dim_color, fade_color as _fade_color
+    if not _CLIPPY_FORCE_PYTHON:
+        from clippy_native import tint_color as _dim_color, fade_color as _fade_color
+    else:
+        raise ImportError("forced")
 except ImportError:
     def _dim_color(c: Color, factor: float) -> Color:  # type: ignore[misc]
         """Dim a color by a factor, preserving alpha."""

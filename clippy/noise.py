@@ -126,7 +126,14 @@ def _noise3_python(x: float, y: float, z: float) -> float:
     return 32.0 * (n0 + n1 + n2 + n3)
 
 
+import os
+
+_CLIPPY_FORCE_PYTHON = os.environ.get("CLIPPY_FORCE_PYTHON", "").lower() in ("1", "true", "yes")
+
 try:
-    from clippy_native import noise3
+    if not _CLIPPY_FORCE_PYTHON:
+        from clippy_native import noise3
+    else:
+        raise ImportError("forced")
 except ImportError:
     noise3 = _noise3_python

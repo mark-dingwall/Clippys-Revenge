@@ -17,8 +17,13 @@ from enum import IntEnum
 from clippy.harness import run
 from clippy.types import Cell, Color, OutputCells, OutputMessage, PTYUpdate, TTYResize
 
+_CLIPPY_FORCE_PYTHON = os.environ.get("CLIPPY_FORCE_PYTHON", "").lower() in ("1", "true", "yes")
+
 try:
-    from clippy_native import tint_color as _tint_impl
+    if not _CLIPPY_FORCE_PYTHON:
+        from clippy_native import tint_color as _tint_impl
+    else:
+        raise ImportError("forced")
 except ImportError:
     def _tint_impl(color: Color, alpha: float) -> Color:  # type: ignore[misc]
         return (color[0] * alpha, color[1] * alpha, color[2] * alpha, color[3])
