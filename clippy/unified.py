@@ -1,9 +1,12 @@
 """Unified effect — single state machine wrapping an inner effect + mascot overlay."""
 from __future__ import annotations
 
+import logging
 import os
 import random
 from enum import IntEnum
+
+logger = logging.getLogger(__name__)
 
 from clippy.harness import Effect
 from clippy.mascot_render import (
@@ -211,14 +214,21 @@ class UnifiedEffect:
         return self._effect_queue.pop(0)
 
     def _start_inner_effect(self) -> None:
-        self._phase = UnifiedPhase.ACTIVE
         self._capture_background()
         self._init_persistent_frame()
         inner_seed = self._rng.randrange(2**32)
         effect_class = self._next_effect_class()
         self._last_played = effect_class
-        self._inner = effect_class(seed=inner_seed, idle_secs=0)
-        # Forward current terminal state
+        try:
+            self._inner = effect_class(seed=inner_seed, idle_secs=0)
+        except Exception:
+            logger.exception("Inner effect constructor failed")
+            if self._demo_mode:
+                self._phase = UnifiedPhase.DONE
+            else:
+                self._start_cackling()
+            return
+        self._phase = UnifiedPhase.ACTIVE
         if self._last_pty_update is not None:
             self._inner.on_pty_update(self._last_pty_update)
         self._shake.reset()
@@ -305,7 +315,7 @@ class UnifiedEffect:
         effect_cells: list[Cell] = []
         for msg in inner_outputs:
             if isinstance(msg, OutputCells):
-                effect_cells = msg.cells
+                effect_cells.extend(msg.cells)
             else:
                 passthrough.append(msg)
 
@@ -386,7 +396,7 @@ class UnifiedEffect:
             if self._inner.is_done:
                 if self._demo_mode:
                     self._phase = UnifiedPhase.DONE
-                    return []
+                    return self._composite(inner_outputs)
                 self._start_cackling()
             return self._composite(inner_outputs)
 

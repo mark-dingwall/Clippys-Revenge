@@ -91,11 +91,14 @@ def find_tattoy() -> str | None:
 
 def ensure_executable(path: Path) -> None:
     """Add shebang if missing and set +x. Idempotent."""
-    content = path.read_text()
-    if not content.startswith("#!"):
-        path.write_text("#!/usr/bin/env python3\n" + content)
-    current = path.stat().st_mode
-    path.chmod(current | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    try:
+        content = path.read_text()
+        if not content.startswith("#!"):
+            path.write_text("#!/usr/bin/env python3\n" + content)
+        current = path.stat().st_mode
+        path.chmod(current | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    except OSError as e:
+        print(f"clippy: could not make {path} executable: {e}", file=sys.stderr)
 
 
 def _escape_toml_string(s: str) -> str:

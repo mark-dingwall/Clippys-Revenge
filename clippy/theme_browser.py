@@ -162,6 +162,8 @@ def _browse_tui(themes: list[Theme], active_name: str | None) -> None:
 
     def _read_key():
         ch = sys.stdin.read(1)
+        if not ch:
+            raise EOFError
         if ch == "\033":
             ch2 = sys.stdin.read(1)
             if ch2 == "[":

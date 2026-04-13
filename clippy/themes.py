@@ -381,10 +381,16 @@ def load_bundled_themes() -> list[Theme]:
         return []
     try:
         data = json.loads(data_path.read_text())
-        return [parse_theme_json(entry) for entry in data]
-    except (json.JSONDecodeError, ValueError, OSError) as e:
+    except (json.JSONDecodeError, OSError) as e:
         logger.warning("Failed to load bundled themes: %s", e)
         return []
+    themes: list[Theme] = []
+    for entry in data:
+        try:
+            themes.append(parse_theme_json(entry))
+        except (ValueError, KeyError) as e:
+            logger.warning("Skipping bundled theme: %s", e)
+    return themes
 
 
 def load_user_themes() -> list[Theme]:
