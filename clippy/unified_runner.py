@@ -9,6 +9,7 @@ from __future__ import annotations
 import importlib
 import os
 import random
+import sys
 
 from clippy.harness import run
 from clippy.unified import UnifiedEffect
@@ -44,7 +45,11 @@ if __name__ == "__main__":
     effect_names_raw = os.environ.get("CLIPPY_EFFECTS", "")
     if effect_names_raw:
         names = [n.strip() for n in effect_names_raw.split(",") if n.strip()]
-        effect_classes = [_load_effect_class(name) for name in names]
+        try:
+            effect_classes = [_load_effect_class(name) for name in names]
+        except ValueError as exc:
+            print(f"clippy: {exc}; loading all effects", file=sys.stderr)
+            effect_classes = _load_all_selectable_classes()
     else:
         effect_classes = _load_all_selectable_classes()
     unified = UnifiedEffect(effect_classes, seed=random.randrange(2**32))
