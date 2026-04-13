@@ -5,7 +5,8 @@ set -euo pipefail
 
 INSTALL_DIR="$HOME/.local/share/clippys-revenge"
 BIN_LINK="$HOME/.local/bin/clippy"
-TMP_DIR="/tmp/clippys-revenge"
+TMP_DIR="${TMPDIR:-/tmp}/clippys-revenge"
+CACHE_DIR="$HOME/.cache/clippys-revenge"
 
 info() { printf '\033[1;34m::\033[0m %s\n' "$*"; }
 ok()   { printf '\033[1;32m::\033[0m %s\n' "$*"; }
@@ -45,6 +46,17 @@ if [ -d "$TMP_DIR" ]; then
         ok "Removed $TMP_DIR"
     else
         err "Cannot remove $TMP_DIR (permission denied)."
+        failed=1
+    fi
+fi
+
+# -- Remove cache directory ----------------------------------------------------
+
+if [ -d "$CACHE_DIR" ]; then
+    if rm -rf "$CACHE_DIR"; then
+        ok "Removed $CACHE_DIR"
+    else
+        err "Cannot remove $CACHE_DIR (permission denied)."
         failed=1
     fi
 fi

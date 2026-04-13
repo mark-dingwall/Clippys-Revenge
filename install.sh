@@ -197,8 +197,24 @@ case ":$PATH:" in
     *":$BIN_DIR:"*) ;;
     *)
         warn "$BIN_DIR is not on your PATH."
-        info "Add this to your shell profile (~/.bashrc, ~/.zshrc, etc.):"
-        info "  export PATH=\"\$HOME/.local/bin:\$PATH\""
+        case "$(basename "${SHELL:-/bin/bash}")" in
+            zsh)  rc_file="$HOME/.zshrc" ;;
+            *)    rc_file="$HOME/.bashrc" ;;
+        esac
+        export_line='export PATH="$HOME/.local/bin:$PATH"'
+        answer=""
+        printf '    Add to %s? [Y/n] ' "$rc_file"
+        { read -r answer </dev/tty; } 2>/dev/null || true
+        case "${answer:-y}" in
+            [Yy]*)
+                printf '\n# Added by Clippy'\''s Revenge installer\n%s\n' "$export_line" >> "$rc_file"
+                ok "Added to $rc_file (restart your shell or run: source $rc_file)"
+                ;;
+            *)
+                info "Add this to your shell profile ($rc_file):"
+                info "  $export_line"
+                ;;
+        esac
         ;;
 esac
 
@@ -208,9 +224,10 @@ echo ""
 ok "Clippy's Revenge installed!"
 echo ""
 info "Usage:"
-info "  clippy              # launch with a random effect"
-info "  clippy --list       # list available effects"
-info "  clippy --effect fire"
-info "  clippy -- vim       # wrap a specific command"
+info "  clippy --demo fire           # try it now (no tattoy needed)"
+info "  clippy                       # launch with all effects"
+info "  clippy --list                # list available effects"
+info "  clippy --effects fire,grove  # limit Clippy to specific effects"
+info "  clippy -- vim                # wrap a specific command"
 echo ""
 info "Uninstall:  bash $INSTALL_DIR/uninstall.sh"
