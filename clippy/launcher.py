@@ -7,8 +7,10 @@ from __future__ import annotations
 
 import argparse
 import importlib
+import importlib.metadata
 import os
 import random
+import re
 import shutil
 import stat
 import subprocess
@@ -221,6 +223,7 @@ def _show_startup(
         jitter = base_delay * (0.5 + rng.random())
         time.sleep(jitter)
     sys.stderr.write("\n")
+    print(f"  Press {_SKY}ALT+T{_RESET} to toggle effects on/off", file=sys.stderr)
     sys.stderr.flush()
 
 
@@ -257,7 +260,7 @@ def generate_config(
     If *theme* is a Theme instance, palette.toml is always regenerated from it.
     """
     if shell_cmd is None:
-        shell_cmd = os.environ.get("SHELL", "/bin/bash")
+        shell_cmd = os.environ.get("SHELL") or shutil.which("bash") or "/bin/sh"
     if config_dir is None:
         config_dir = str(Path.home() / ".cache" / "clippys-revenge")
 
@@ -314,10 +317,31 @@ class _ClippyArgumentParser(argparse.ArgumentParser):
         return "\n".join(lines)
 
 
+def _get_version() -> str:
+    """Return the package version, falling back to pyproject.toml then 'unknown'."""
+    try:
+        return importlib.metadata.version("clippys-revenge")
+    except importlib.metadata.PackageNotFoundError:
+        pass
+    pyproject = Path(__file__).resolve().parent.parent / "pyproject.toml"
+    if pyproject.is_file():
+        m = re.search(r'version\s*=\s*"([^"]+)"', pyproject.read_text())
+        if m:
+            return m.group(1)
+    return "unknown"
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = _ClippyArgumentParser(
         prog="clippy",
-        description="Clippy's Revenge — chaotic terminal effects via tattoy",
+        description="Clippy's Revenge \u2014 chaotic terminal effects via tattoy",
+        epilog="Press ALT+T to toggle effects on/off while running.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "--version", "-V",
+        action="version",
+        version=f"%(prog)s {_get_version()}",
     )
     parser.add_argument(
         "--effects", "-e",
@@ -365,6 +389,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="import a color scheme JSON theme (file path or URL)",
     )
     parser.add_argument(
+        "--theme-list",
+        action="store_true",
+        help="list available theme names and exit",
+    )
+    parser.add_argument(
         "--theme-reset",
         action="store_true",
         help="reset to default theme (Tokyo Night)",
@@ -402,6 +431,13 @@ def main(argv: list[str] | None = None) -> int:
             body,
             file=sys.stdout,
         )
+        return 0
+
+    # --theme-list (early exit, no native build needed)
+    if args.theme_list:
+        from clippy.themes import load_all_themes
+        for t in sorted(load_all_themes(), key=lambda t: t.name.lower()):
+            print(t.name)
         return 0
 
     # --optimised handling
@@ -617,7 +653,11 @@ def main(argv: list[str] | None = None) -> int:
             [
                 "tattoy not found.",
                 "",
-                "Install tattoy:  https://tattoy.sh",
+                "Try demo mode (no tattoy needed):",
+                "  clippy --demo fire",
+                "",
+                "Install tattoy for the full experience:",
+                "  https://tattoy.sh",
                 "  Or:  cargo install tattoy",
             ],
         )
