@@ -691,3 +691,86 @@ def test_destructive_default_all_touched():
     # FakeEffect returns empty cells, but let's verify the default behavior
     # by checking that _touched starts empty and the default is True
     assert getattr(FakeEffect, 'destructive', True) is True
+
+
+# ---------------------------------------------------------------------------
+# Edge cases
+# ---------------------------------------------------------------------------
+
+def test_empty_effect_classes_list():
+    """UnifiedEffect([]) → IndexError when trying to start inner effect."""
+    effect = UnifiedEffect([], idle_secs=0)
+    with pytest.raises(IndexError):
+        effect.on_pty_update(make_pty_update(80, 24))
+
+
+class _RaisesOnCancel(FakeEffect):
+    """FakeEffect that raises RuntimeError on cancel()."""
+    EFFECT_META = {"name": "raises_cancel", "description": "test"}
+
+    def cancel(self):
+        raise RuntimeError("cancel failed")
+
+
+def test_inner_cancel_raises_exception():
+    """Inner cancel() raising RuntimeError propagates."""
+    effect = UnifiedEffect(_RaisesOnCancel, idle_secs=0, seed=42)
+    effect.on_pty_update(make_pty_update(80, 24))
+    assert effect.phase == UnifiedPhase.ACTIVE
+    with pytest.raises(RuntimeError, match="cancel failed"):
+        effect.cancel()
+
+
+def test_on_resize_before_pty_update():
+    """Resize as first event → no crash, dimensions updated."""
+    effect = UnifiedEffect(FakeEffect, idle_secs=300)
+    effect.on_resize(TTYResize(width=40, height=12))
+    assert effect._width == 40
+    assert effect._height == 12
+
+
+def test_rapid_consecutive_resizes():
+    """10 rapid resizes during ACTIVE → final size correct, no crash."""
+    effect = UnifiedEffect(FakeEffect, idle_secs=0, seed=42)
+    effect.on_pty_update(make_pty_update(80, 24))
+    assert effect.phase == UnifiedPhase.ACTIVE
+    for i in range(10):
+        effect.on_resize(TTYResize(width=40 + i, height=12 + i))
+        effect.tick()
+    assert effect._width == 49
+    assert effect._height == 21
+
+
+def test_clippy_interval_negative(monkeypatch):
+    """CLIPPY_INTERVAL='-10' → negative idle_secs, doesn't crash."""
+    monkeypatch.setenv("CLIPPY_INTERVAL", "-10")
+    effect = UnifiedEffect(FakeEffect, seed=42)
+    effect.on_pty_update(make_pty_update(80, 24))
+    # Negative idle_secs: timing thresholds are in the past, phases advance rapidly
+    for _ in range(50):
+        effect.tick()
+
+
+def test_clippy_interval_zero(monkeypatch):
+    """CLIPPY_INTERVAL='0' → demo mode, ACTIVE immediately."""
+    monkeypatch.setenv("CLIPPY_INTERVAL", "0")
+    effect = UnifiedEffect(FakeEffect, seed=42)
+    effect.on_pty_update(make_pty_update(80, 24))
+    assert effect.phase == UnifiedPhase.ACTIVE
+
+
+def test_clippy_interval_non_numeric(monkeypatch):
+    """CLIPPY_INTERVAL='abc' → ValueError from constructor."""
+    monkeypatch.setenv("CLIPPY_INTERVAL", "abc")
+    with pytest.raises(ValueError):
+        UnifiedEffect(FakeEffect, seed=42)
+
+
+def test_zero_size_terminal_resize():
+    """Resize to 0×0 → no crash, early return in _composite."""
+    effect = UnifiedEffect(FakeEffect, idle_secs=0, seed=42)
+    effect.on_pty_update(make_pty_update(80, 24))
+    assert effect.phase == UnifiedPhase.ACTIVE
+    effect.on_resize(TTYResize(width=0, height=0))
+    outputs = effect.tick()
+    assert isinstance(outputs, list)

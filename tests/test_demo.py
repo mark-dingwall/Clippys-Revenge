@@ -313,6 +313,128 @@ class TestDemoRun:
         assert effect.phase == Phase.DONE
         assert tick_count[0] > 0
 
+    def test_cleanup_on_writer_ioerror(self):
+        """Writer IOError mid-render → cleanup still runs."""
+        calls = []
+        should_fail = [False]
+
+        def writer(s):
+            calls.append(s)
+            if should_fail[0]:
+                should_fail[0] = False
+                raise IOError("write failed")
+
+        class TriggerEffect:
+            def on_pty_update(self, update): pass
+            def on_resize(self, resize): pass
+            def tick(self):
+                should_fail[0] = True
+                return [OutputCells(cells=[
+                    Cell(character="X", coordinates=(0, 0),
+                         fg=(1.0, 0.0, 0.0, 1.0), bg=None)
+                ])]
+
+        demo_run(
+            TriggerEffect(), 80, 24,
+            fps=1000,
+            clock=lambda: 0.0,
+            sleep=lambda t: None,
+            writer=writer,
+            flush=lambda: None,
+        )
+
+        joined = "".join(calls)
+        assert SHOW_CURSOR in joined
+        assert ALT_SCREEN_OFF in joined
+
+    def test_cleanup_on_flush_error(self):
+        """Flush raises OSError → cleanup runs."""
+        calls = []
+        should_fail_flush = [False]
+
+        def flush():
+            if should_fail_flush[0]:
+                should_fail_flush[0] = False
+                raise OSError("flush failed")
+
+        class TriggerEffect:
+            def on_pty_update(self, update): pass
+            def on_resize(self, resize): pass
+            def tick(self):
+                should_fail_flush[0] = True
+                return [OutputCells(cells=[
+                    Cell(character="X", coordinates=(0, 0),
+                         fg=(1.0, 0.0, 0.0, 1.0), bg=None)
+                ])]
+
+        demo_run(
+            TriggerEffect(), 80, 24,
+            fps=1000,
+            clock=lambda: 0.0,
+            sleep=lambda t: None,
+            writer=calls.append,
+            flush=flush,
+        )
+
+        joined = "".join(calls)
+        assert SHOW_CURSOR in joined
+        assert ALT_SCREEN_OFF in joined
+
+    @pytest.mark.parametrize("exc_class", [KeyboardInterrupt, RuntimeError, IOError])
+    def test_always_restores_terminal(self, exc_class):
+        """Cleanup always runs regardless of exception type."""
+        calls = []
+
+        class ExcEffect:
+            def on_pty_update(self, update): pass
+            def on_resize(self, resize): pass
+            def tick(self):
+                raise exc_class("test")
+
+        demo_run(
+            ExcEffect(), 80, 24,
+            fps=1000,
+            clock=lambda: 0.0,
+            sleep=lambda t: None,
+            writer=calls.append,
+            flush=lambda: None,
+        )
+
+        joined = "".join(calls)
+        assert SHOW_CURSOR in joined
+        assert ALT_SCREEN_OFF in joined
+
+    def test_partial_frame_failure_cleanup(self):
+        """Effect works tick 1, fails tick 2 → cleanup still runs."""
+        calls = []
+
+        class PartialEffect:
+            def __init__(self):
+                self.tick_count = 0
+            def on_pty_update(self, update): pass
+            def on_resize(self, resize): pass
+            def tick(self):
+                self.tick_count += 1
+                if self.tick_count == 1:
+                    return [OutputCells(cells=[
+                        Cell(character="X", coordinates=(0, 0),
+                             fg=(1.0, 0.0, 0.0, 1.0), bg=None)
+                    ])]
+                raise RuntimeError("tick 2 failed")
+
+        demo_run(
+            PartialEffect(), 80, 24,
+            fps=1000,
+            clock=lambda: 0.0,
+            sleep=lambda t: None,
+            writer=calls.append,
+            flush=lambda: None,
+        )
+
+        joined = "".join(calls)
+        assert SHOW_CURSOR in joined
+        assert ALT_SCREEN_OFF in joined
+
     def test_frame_budget_sleep(self):
         """Verify sleep is called with remaining frame budget."""
         sleep_args = []

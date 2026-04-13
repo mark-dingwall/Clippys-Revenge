@@ -138,6 +138,37 @@ class TestGenerateConfig:
         content = (Path(config_dir) / "tattoy.toml").read_text()
         assert 'command = "/bin/fish"' in content
 
+    def test_shell_fallback_to_bash(self, tmp_path):
+        env = {k: v for k, v in os.environ.items() if k != "SHELL"}
+        with mock.patch.dict(os.environ, env, clear=True), \
+             mock.patch("shutil.which", return_value="/usr/bin/bash"):
+            config_dir = generate_config(["/path/to/fire.py"], config_dir=str(tmp_path))
+        content = (Path(config_dir) / "tattoy.toml").read_text()
+        assert 'command = "/usr/bin/bash"' in content
+
+    def test_shell_fallback_to_bin_sh(self, tmp_path):
+        env = {k: v for k, v in os.environ.items() if k != "SHELL"}
+        with mock.patch.dict(os.environ, env, clear=True), \
+             mock.patch("shutil.which", return_value=None):
+            config_dir = generate_config(["/path/to/fire.py"], config_dir=str(tmp_path))
+        content = (Path(config_dir) / "tattoy.toml").read_text()
+        assert 'command = "/bin/sh"' in content
+
+    def test_shell_fallback_empty_shell_env(self, tmp_path):
+        """SHELL='' is falsy → falls through to shutil.which('bash')."""
+        with mock.patch.dict(os.environ, {"SHELL": ""}), \
+             mock.patch("shutil.which", return_value="/usr/bin/bash"):
+            config_dir = generate_config(["/path/to/fire.py"], config_dir=str(tmp_path))
+        content = (Path(config_dir) / "tattoy.toml").read_text()
+        assert 'command = "/usr/bin/bash"' in content
+
+    def test_shell_nonexistent_path_used_verbatim(self, tmp_path):
+        """SHELL='/no/such/shell' written to config as-is (no validation)."""
+        with mock.patch.dict(os.environ, {"SHELL": "/no/such/shell"}):
+            config_dir = generate_config(["/path/to/fire.py"], config_dir=str(tmp_path))
+        content = (Path(config_dir) / "tattoy.toml").read_text()
+        assert 'command = "/no/such/shell"' in content
+
     def test_backslash_escaping(self, tmp_path):
         config_dir = generate_config(
             [r"C:\Users\test\fire.py"],
@@ -181,6 +212,7 @@ class TestMain:
         assert "It looks like" in out
         assert "^╭╮^" in out
         assert "--effects" in out
+        assert "ALT+T" in out
 
     def test_list_effects(self, capsys):
         assert main(["--list"]) == 0
@@ -216,6 +248,7 @@ class TestMain:
             assert main(["--effects", "fire"]) == 1
         captured = capsys.readouterr()
         assert "tattoy not found" in captured.err
+        assert "--demo" in captured.err
         assert "It looks like" in captured.err
 
     def test_launch_execs_tattoy(self, tmp_path):
@@ -464,6 +497,14 @@ class TestThemeCLI:
         _, kwargs = mock_demo.call_args
         assert kwargs.get("theme") is not None
 
+    def test_theme_apply_exception_propagates(self, tmp_path):
+        """apply_theme() raising OSError propagates from main()."""
+        from clippy.themes import default_theme
+        with mock.patch("clippy.themes.import_theme_from_file", return_value=default_theme()), \
+             mock.patch("clippy.themes.apply_theme", side_effect=OSError("disk full")):
+            with pytest.raises(OSError, match="disk full"):
+                main(["--theme-import", str(tmp_path / "fake.json")])
+
 
 class TestGenerateConfigTheme:
     def test_theme_regenerates_palette(self, tmp_path):
@@ -543,3 +584,61 @@ class TestParseEffectNames:
         valid, invalid = _parse_effect_names("fire,,grove", {"fire", "grove"})
         assert valid == ["fire", "grove"]
         assert invalid == []
+
+
+# ---------------------------------------------------------------------------
+# --version flag
+# ---------------------------------------------------------------------------
+
+class TestVersion:
+    def test_version_flag(self, capsys):
+        with pytest.raises(SystemExit, match="0"):
+            main(["--version"])
+        out = capsys.readouterr().out
+        import re
+        assert re.search(r"clippy \d+\.\d+\.\d+", out)
+
+    def test_version_fallback(self, capsys):
+        """When importlib.metadata fails, version comes from pyproject.toml."""
+        import importlib.metadata
+        with mock.patch(
+            "clippy.launcher.importlib.metadata.version",
+            side_effect=importlib.metadata.PackageNotFoundError,
+        ):
+            from clippy.launcher import _get_version
+            v = _get_version()
+        import re
+        assert re.match(r"\d+\.\d+\.\d+", v)
+
+
+# ---------------------------------------------------------------------------
+# ALT+T discoverability
+# ---------------------------------------------------------------------------
+
+class TestAltTDiscoverability:
+    def test_startup_shows_keybinding(self, capsys):
+        from clippy.launcher import _show_startup
+        with mock.patch("time.sleep"):
+            _show_startup(["fire"], {"fire": {}}, False, False)
+        err = capsys.readouterr().err
+        assert "ALT+T" in err
+
+
+# ---------------------------------------------------------------------------
+# --theme-list flag
+# ---------------------------------------------------------------------------
+
+class TestThemeList:
+    def test_theme_list(self, capsys):
+        result = main(["--theme-list"])
+        assert result == 0
+        out = capsys.readouterr().out
+        assert "Tokyo Night" in out
+        assert "Dracula" in out
+
+    def test_theme_list_plain_output(self, capsys):
+        """Output has no ANSI escapes — suitable for piping."""
+        main(["--theme-list"])
+        out = capsys.readouterr().out
+        assert "\033[" not in out
+        assert "\x1b[" not in out

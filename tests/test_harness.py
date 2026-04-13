@@ -597,3 +597,66 @@ def test_run_to_json_exception_continues():
         reader=reader,
     )
     assert effect.tick_count >= 2
+
+
+def test_run_negative_fps_env(monkeypatch):
+    """CLIPPY_FPS='-5' → int('-5') succeeds, max(1, -5) clamps to 1. No crash."""
+    monkeypatch.setenv("CLIPPY_FPS", "-5")
+    reader = MessageReader()
+
+    class ExitOnTick:
+        def on_pty_update(self, update): pass
+        def on_resize(self, resize): pass
+        def tick(self):
+            reader.stop()
+            raise KeyboardInterrupt
+
+    run(
+        ExitOnTick(),
+        fps=30,
+        writer=lambda s: None,
+        flush=lambda: None,
+        reader=reader,
+    )
+
+
+def test_run_float_fps_env(monkeypatch):
+    """CLIPPY_FPS='30.5' → int('30.5') raises ValueError → caught, default kept."""
+    monkeypatch.setenv("CLIPPY_FPS", "30.5")
+    reader = MessageReader()
+
+    class ExitOnTick:
+        def on_pty_update(self, update): pass
+        def on_resize(self, resize): pass
+        def tick(self):
+            reader.stop()
+            raise KeyboardInterrupt
+
+    run(
+        ExitOnTick(),
+        fps=30,
+        writer=lambda s: None,
+        flush=lambda: None,
+        reader=reader,
+    )
+
+
+def test_run_empty_fps_env(monkeypatch):
+    """CLIPPY_FPS='' → int('') raises ValueError → caught, default kept."""
+    monkeypatch.setenv("CLIPPY_FPS", "")
+    reader = MessageReader()
+
+    class ExitOnTick:
+        def on_pty_update(self, update): pass
+        def on_resize(self, resize): pass
+        def tick(self):
+            reader.stop()
+            raise KeyboardInterrupt
+
+    run(
+        ExitOnTick(),
+        fps=30,
+        writer=lambda s: None,
+        flush=lambda: None,
+        reader=reader,
+    )
