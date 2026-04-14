@@ -92,13 +92,23 @@ clippy --startup-pause
 
 **Fire**: the ol' reliable. When in doubt, burn it to ash.
 
+<video src="assets/demos/fire.mp4" width="300" autoplay loop muted playsinline></video>
+
 **Invaders**: an initial round of Shock and Awe followed by full invasion.
+
+<video src="assets/demos/invaders.mp4" width="300" autoplay loop muted playsinline></video>
 
 **Grove**: nature rises up to reclaim your terminal. It's actually quite pretty.
 
+<video src="assets/demos/grove.mp4" width="300" autoplay loop muted playsinline></video>
+
 **Microbes**: hungry microbes dash and wiggle over your screen, eating your work.
 
+<video src="assets/demos/microbes.mp4" width="300" autoplay loop muted playsinline></video>
+
 **Paperclips**: it was inevitable that Clippy would dominate the world one day.
+
+<video src="assets/demos/paperclips.mp4" width="300" autoplay loop muted playsinline></video>
 
 **Mascot**: Clippy watches from the corner with open contempt. Breaking your flow and ruining your productivity is the only thing that brings joy to his cold, calloused heart.
 
