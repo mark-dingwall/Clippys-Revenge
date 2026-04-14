@@ -53,6 +53,9 @@ python3 -m clippy.launcher --theme-reset          # Reset to default (Tokyo Nigh
 python3 -m clippy.launcher --shake off            # Disable shake detection
 python3 -m clippy.launcher --shake 8              # Require more reversals
 
+# Pause at startup to read diagnostics
+python3 -m clippy.launcher --startup-pause
+
 # Build optional Rust acceleration module
 pip install maturin
 cd native && maturin develop --release
@@ -85,7 +88,7 @@ User runs `clippy` CLI
 - `clippy/themes.py` — Theme system: `Theme` dataclass (18 named RGB colors in standard terminal color scheme format), `DemoTheme` dataclass (ANSI escape strings for demo-mode IDE rendering), color scheme JSON parsing (`parse_theme_json()`), palette TOML generation (`theme_to_palette_toml()`), demo theme derivation (`theme_to_demo_theme()`), persistence (`get_active_theme()` / `set_active_theme_name()` via `~/.cache/clippys-revenge/theme.json`), bundled theme loading, user theme import (file or URL via `urllib.request`). `default_demo_theme()` returns the original hardcoded VS Code dark+ colors for backward compatibility.
 - `clippy/theme_browser.py` — Interactive TUI theme browser using alternate screen buffer and raw terminal input (`tty`/`termios`). Arrow keys navigate, `/` enters search mode (substring filter), Enter selects and applies, `q`/Escape quits. Falls back to simple numbered list when raw terminal is unavailable (piped stdin, dumb terminal). **Important:** All TUI output uses `\r\n` (not bare `\n`) because raw terminal mode disables the kernel's LF→CRLF translation.
 - `clippy/themes_data.json` — 35 curated themes in standard terminal color scheme JSON format (Tokyo Night, Dracula, Catppuccin x4, Nord, Gruvbox x2, Solarized x2, One Dark/Light, Monokai, Rose Pine x3, Kanagawa, Material, Ayu x2, Everforest x2, GitHub x2, Tomorrow Night, Nightfox, Palenight, Tokyonight Storm, Zenburn, Synthwave 84, Horizon Dark, Cobalt2, Poimandres, Snazzy).
-- `clippy/launcher.py` — CLI entry point. Discovers effects, generates tattoy config, execs tattoy. Uses `unified_runner.py` as the single plugin entry point (no separate mascot plugin). Supports `--version`/`-V`, `--shake off|N`, `--theme NAME`, `--themes`, `--theme-list`, `--theme-import PATH`, `--theme-reset` flags. Configures ALT+T as tattoy keybinding to toggle effects on/off. Shell fallback chain: `$SHELL → shutil.which("bash") → /bin/sh`.
+- `clippy/launcher.py` — CLI entry point. Discovers effects, generates tattoy config, execs tattoy. Uses `unified_runner.py` as the single plugin entry point (no separate mascot plugin). Supports `--version`/`-V`, `--shake off|N`, `--startup-pause`, `--theme NAME`, `--themes`, `--theme-list`, `--theme-import PATH`, `--theme-reset` flags. Configures ALT+T as tattoy keybinding to toggle effects on/off. Shell fallback chain: `$SHELL → shutil.which("bash") → /bin/sh`.
 - `clippy/demo.py` — ANSI terminal renderer for `--demo` mode (no tattoy required). Accepts an optional `DemoTheme` parameter; defaults to `default_demo_theme()` when no theme is active.
 - `clippy/ide_template.py` — Generates a fake VS Code-style Python editor background for `--demo` mode. Effects render on top, visually destroying the code.
 - `bin/clippy` — Shell wrapper that sets `PYTHONPATH` and execs `python3 -m clippy.launcher`.

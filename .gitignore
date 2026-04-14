@@ -15,6 +15,9 @@ pytest-of-*/
 # Claude Code local settings
 .claude/
 
+# Codex artifacts
+.codex
+
 # Rust build artifacts
 native/target/
 *.so

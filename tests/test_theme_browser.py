@@ -6,7 +6,10 @@ from unittest import mock
 
 import pytest
 
-from clippy.theme_browser import _render_swatch, _browse_simple, _browse_tui, browse_themes
+from clippy.theme_browser import (
+    _render_swatch, _browse_simple, _browse_tui, browse_themes,
+    _visible_len, _truncate_ansi, _pad_ansi,
+)
 from clippy.themes import Theme, default_theme
 
 
@@ -230,6 +233,53 @@ class TestBrowseTui:
 
 
 # ---------------------------------------------------------------------------
+# Theme preview (live full-screen recolor)
+# ---------------------------------------------------------------------------
+
+class TestThemePreview(TestBrowseTui):
+    """Preview colors change with cursor position."""
+
+    def _make_dark_theme(self):
+        return _make_theme("Dark")
+
+    def _make_light_theme(self):
+        return Theme(
+            name="Light",
+            background=(240, 240, 240),
+            foreground=(30, 30, 30),
+            black=(0, 0, 0), red=(200, 0, 0), green=(0, 150, 0),
+            yellow=(180, 150, 0), blue=(0, 0, 200), purple=(120, 0, 120),
+            cyan=(0, 150, 150), white=(220, 220, 220),
+            bright_black=(100, 100, 100), bright_red=(255, 80, 80),
+            bright_green=(80, 200, 80), bright_yellow=(220, 200, 80),
+            bright_blue=(80, 80, 255), bright_purple=(200, 80, 200),
+            bright_cyan=(80, 200, 200), bright_white=(255, 255, 255),
+        )
+
+    def test_background_uses_cursor_theme(self):
+        """Screen bg escape matches cursor theme's background."""
+        themes = [self._make_dark_theme(), self._make_light_theme()]
+        output = self._run_tui(themes, "q")
+        # Dark theme bg (0,0,0) is selected initially
+        assert "\033[48;2;0;0;0m" in output
+
+    def test_foreground_uses_cursor_theme(self):
+        """Screen fg escape matches cursor theme's foreground."""
+        themes = [self._make_dark_theme(), self._make_light_theme()]
+        output = self._run_tui(themes, "q")
+        # Dark theme fg (255,255,255)
+        assert "\033[38;2;255;255;255m" in output
+
+    def test_moving_cursor_changes_preview(self):
+        """Moving down switches preview to second theme's colors."""
+        themes = [self._make_dark_theme(), self._make_light_theme()]
+        # Down arrow then quit
+        output = self._run_tui(themes, "\033[Bq")
+        # Light theme bg (240,240,240) should appear after move
+        assert "\033[48;2;240;240;240m" in output
+
+
+# ---------------------------------------------------------------------------
 # browse_themes entry point
 # ---------------------------------------------------------------------------
 
@@ -252,3 +302,102 @@ class TestBrowseThemes:
             browse_themes()
         out = capsys.readouterr().out
         assert "Alpha" in out
+
+
+# ---------------------------------------------------------------------------
+# ANSI-aware string helpers
+# ---------------------------------------------------------------------------
+
+class TestAnsiHelpers:
+    def test_visible_len_strips_ansi(self):
+        assert _visible_len("\033[31mhello\033[0m") == 5
+
+    def test_visible_len_plain(self):
+        assert _visible_len("hello") == 5
+
+    def test_visible_len_empty(self):
+        assert _visible_len("") == 0
+
+    def test_truncate_ansi_respects_width(self):
+        s = "\033[31mhello world\033[0m"
+        result = _truncate_ansi(s, 5)
+        assert _visible_len(result) == 5
+        # Escape still present
+        assert "\033[31m" in result
+        # Only "hello" visible
+        assert "hello" in result
+        assert "world" not in result
+
+    def test_truncate_ansi_no_truncation(self):
+        s = "\033[31mhi\033[0m"
+        assert _truncate_ansi(s, 10) == s
+
+    def test_pad_ansi_fills_to_width(self):
+        bg = "\033[48;2;0;0;0m"
+        s = "\033[31mhi\033[0m"
+        result = _pad_ansi(s, 10, bg)
+        assert _visible_len(result) == 10
+
+    def test_pad_ansi_truncates_when_over(self):
+        bg = "\033[48;2;0;0;0m"
+        s = "hello world"
+        result = _pad_ansi(s, 5, bg)
+        assert _visible_len(result) == 5
+
+
+# ---------------------------------------------------------------------------
+# Code preview panel
+# ---------------------------------------------------------------------------
+
+class TestCodePreview(TestBrowseTui):
+    """Tests for the syntax-highlighted code preview panel."""
+
+    def test_preview_appears_wide_terminal(self):
+        """At 140 cols, output contains highlighted code tokens."""
+        themes = [_make_theme("Alpha"), _make_theme("Beta")]
+        output = self._run_tui(themes, "q", term_size=(140, 30))
+        # Preview header
+        assert "Preview" in output
+        # Code from _RIGHT should appear (keywords, imports)
+        assert "import" in output
+        assert "class" in output or "def" in output
+
+    def test_preview_hidden_narrow_terminal(self):
+        """At 80 cols, no preview separator appears."""
+        themes = [_make_theme("Alpha"), _make_theme("Beta")]
+        output = self._run_tui(themes, "q", term_size=(80, 24))
+        assert "Preview" not in output
+
+    def test_preview_colors_change_on_navigate(self):
+        """Moving cursor changes syntax highlight colors in preview."""
+        dark = _make_theme("Dark")
+        light = Theme(
+            name="Light",
+            background=(240, 240, 240),
+            foreground=(30, 30, 30),
+            black=(0, 0, 0), red=(200, 0, 0), green=(0, 150, 0),
+            yellow=(180, 150, 0), blue=(0, 0, 200), purple=(120, 0, 120),
+            cyan=(0, 150, 150), white=(220, 220, 220),
+            bright_black=(100, 100, 100), bright_red=(255, 80, 80),
+            bright_green=(80, 200, 80), bright_yellow=(220, 200, 80),
+            bright_blue=(80, 80, 255), bright_purple=(200, 80, 200),
+            bright_cyan=(80, 200, 200), bright_white=(255, 255, 255),
+        )
+        # First draw at Dark, then arrow down to Light, then quit
+        output = self._run_tui([dark, light], "\033[Bq", term_size=(140, 30))
+        # Light theme bg (240,240,240) should appear in preview area
+        assert "\033[48;2;240;240;240m" in output
+
+    def test_preview_uses_cr_lf(self):
+        """Raw mode \\r\\n requirement holds with preview enabled."""
+        themes = [_make_theme("Alpha"), _make_theme("Beta")]
+        output = self._run_tui(themes, "q", term_size=(140, 30))
+        lines_with_bare_lf = []
+        for i, ch in enumerate(output):
+            if ch == "\n" and (i == 0 or output[i - 1] != "\r"):
+                start = max(0, i - 30)
+                end = min(len(output), i + 10)
+                lines_with_bare_lf.append(repr(output[start:end]))
+        assert lines_with_bare_lf == [], (
+            f"Found bare \\n (no \\r) in TUI output at: {lines_with_bare_lf[:3]}"
+        )

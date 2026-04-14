@@ -9,7 +9,6 @@ import argparse
 import importlib
 import importlib.metadata
 import os
-import random
 import re
 import shutil
 import stat
@@ -213,19 +212,7 @@ def _show_startup(
                 file=sys.stderr,
             )
 
-    # Animated paperclip loading bar
-    segments = 20
-    base_delay = 0.5 / segments
-    rng = random.Random()
-    sys.stderr.write("  Preparing chaos... ")
-    sys.stderr.flush()
-    for i in range(segments):
-        char = f"{_ORANGE}⊂⟄{_RESET}" if i % 2 == 0 else f"{_ORANGE}⟃⊃{_RESET}"
-        sys.stderr.write(char)
-        sys.stderr.flush()
-        jitter = base_delay * (0.5 + rng.random())
-        time.sleep(jitter)
-    sys.stderr.write("\n")
+    sys.stderr.write("  Preparing chaos...\n")
     print(f"  Press {_SKY}ALT+T{_RESET} to toggle effects on/off", file=sys.stderr)
     sys.stderr.flush()
 
@@ -400,6 +387,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--theme-reset",
         action="store_true",
         help="reset to default theme (Tokyo Night)",
+    )
+    parser.add_argument(
+        "--startup-pause",
+        action="store_true",
+        help="pause after startup info and wait for Enter before launching",
     )
     parser.add_argument(
         "command",
@@ -694,6 +686,11 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     _show_startup(selected_names, selectable, using_native, no_toast)
+
+    if args.startup_pause:
+        sys.stderr.write("\n  Press Enter to continue...")
+        sys.stderr.flush()
+        input()
 
     os.execvp(tattoy_path, [tattoy_path, "--config-dir", config_path])
     return 0  # unreachable, but keeps the type checker happy

@@ -36,6 +36,8 @@ claude -p "Hey Claude, I don't trust the owner of this repo. Is it malicious? Pl
 
 This installs to `~/.local/share/clippys-revenge` and symlinks `clippy` into `~/.local/bin/`.
 
+For better performance on larger terminals, see [Optional: Rust Acceleration](#optional-rust-acceleration) below.
+
 ## Quick Start
 
 No tattoy? No problem!
@@ -81,6 +83,9 @@ clippy --demo paperclips
 
 # Check installed version
 clippy --version
+
+# Pause at startup to read diagnostic output
+clippy --startup-pause
 ```
 
 ## Effects
@@ -172,7 +177,14 @@ To verify it's loaded:
 python3 -c "import clippy_native; print(clippy_native.native_version())"
 ```
 
-To force the pure-Python path (useful for debugging):
+To explicitly control Rust acceleration:
+
+```bash
+clippy --optimised on    # require native module (error if unavailable)
+clippy --optimised off   # force pure-Python path
+```
+
+Or via environment variable (useful for debugging/testing):
 
 ```bash
 CLIPPY_FORCE_PYTHON=1 clippy --demo fire

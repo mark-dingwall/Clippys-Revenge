@@ -5,16 +5,82 @@ search filtering, color swatches, and theme selection.
 """
 from __future__ import annotations
 
+import os
+import re
 import sys
 
+from clippy.demo import _highlight_python
+from clippy.ide_template import _RIGHT
 from clippy.themes import (
-    DemoTheme,
     Theme,
     apply_theme,
     get_active_theme_name,
     load_all_themes,
     theme_to_demo_theme,
 )
+
+
+# ---------------------------------------------------------------------------
+# ANSI color helpers
+# ---------------------------------------------------------------------------
+
+def _ansi_fg(r: int, g: int, b: int) -> str:
+    return f"\033[38;2;{r};{g};{b}m"
+
+
+def _ansi_bg(r: int, g: int, b: int) -> str:
+    return f"\033[48;2;{r};{g};{b}m"
+
+
+def _lighten(rgb: tuple[int, int, int], pct: float) -> tuple[int, int, int]:
+    """Lighten an RGB color by *pct* (0.0–1.0) toward white."""
+    r, g, b = rgb
+    return (
+        min(255, int(r + (255 - r) * pct)),
+        min(255, int(g + (255 - g) * pct)),
+        min(255, int(b + (255 - b) * pct)),
+    )
+
+
+# ---------------------------------------------------------------------------
+# ANSI-aware string helpers
+# ---------------------------------------------------------------------------
+
+_ANSI_RE = re.compile(r'\033\[[0-9;]*m')
+
+
+def _visible_len(s: str) -> int:
+    """String length ignoring ANSI escape sequences."""
+    return len(_ANSI_RE.sub('', s))
+
+
+def _truncate_ansi(s: str, max_width: int) -> str:
+    """Truncate to max_width visible chars, preserving ANSI escapes."""
+    out: list[str] = []
+    vis = 0
+    pos = 0
+    for m in _ANSI_RE.finditer(s):
+        for ch in s[pos:m.start()]:
+            if vis >= max_width:
+                return ''.join(out)
+            out.append(ch)
+            vis += 1
+        out.append(m.group())
+        pos = m.end()
+    for ch in s[pos:]:
+        if vis >= max_width:
+            break
+        out.append(ch)
+        vis += 1
+    return ''.join(out)
+
+
+def _pad_ansi(s: str, width: int, bg: str) -> str:
+    """Pad an ANSI string to exact visible width with bg-colored spaces."""
+    vis = _visible_len(s)
+    if vis >= width:
+        return _truncate_ansi(s, width)
+    return s + bg + ' ' * (width - vis)
 
 
 # ---------------------------------------------------------------------------
@@ -76,6 +142,9 @@ def _browse_tui(themes: list[Theme], active_name: str | None) -> None:
     import tty
     import termios
 
+    if not themes:
+        return
+
     fd = sys.stdin.fileno()
     old_settings = termios.tcgetattr(fd)
 
@@ -97,13 +166,12 @@ def _browse_tui(themes: list[Theme], active_name: str | None) -> None:
 
     def _get_size():
         try:
-            import os
-            cols, rows = os.get_terminal_size()
+            cols, rows = os.get_terminal_size(fd)
             return cols, rows
         except OSError:
             return 80, 24
 
-    def _draw():
+    def _draw(preview: Theme) -> None:
         cols, rows = _get_size()
         visible_rows = rows - 6  # header(3) + footer(2) + search(1)
         if visible_rows < 1:
@@ -116,25 +184,93 @@ def _browse_tui(themes: list[Theme], active_name: str | None) -> None:
         if cursor >= scroll_offset + visible_rows:
             scroll_offset = cursor - visible_rows + 1
 
+        # Derive screen colors from the preview theme
+        bg = _ansi_bg(*preview.background)
+        fg = _ansi_fg(*preview.foreground)
+        dim_fg = _ansi_fg(*preview.bright_black)
+        accent_fg = _ansi_fg(*preview.cyan)
+        sel_bg_rgb = preview.selection_background or _lighten(preview.background, 0.20)
+        sel_bg = _ansi_bg(*sel_bg_rgb)
+
         # In raw mode \n is just line-feed (no carriage return), so every
         # newline must be \r\n to return the cursor to column 0.
         NL = "\r\n"
+        # End-of-line: fill remainder with theme bg, then newline
+        EOL = f"{bg}\033[K{NL}"
+
+        # Two-column layout when terminal is wide enough
+        show_preview = cols >= 120
+        if show_preview:
+            list_w = 73
+            preview_w = cols - list_w - 1  # 1 for separator
+            code_inner_w = preview_w - 2   # 1 left pad + 1 right pad
+            demo_theme = theme_to_demo_theme(preview)
+            code_bg = demo_theme.ide_bg
+            # Pre-highlight code lines
+            code_lines: list[str] = []
+            for src in _RIGHT:
+                highlighted = _highlight_python(src, demo_theme)
+                code_lines.append(highlighted)
+
+        def _right_col(code_idx: int) -> str:
+            """Build right column content for a given code line index."""
+            if not show_preview:
+                return ""
+            sep = f"{bg}{dim_fg}\u2502"
+            if code_idx < len(code_lines):
+                inner = _truncate_ansi(code_lines[code_idx], code_inner_w)
+                padded = _pad_ansi(f" {inner} ", preview_w, code_bg)
+            else:
+                padded = code_bg + " " * preview_w
+            return f"{sep}{padded}\033[0m"
+
+        def _left_pad(content: str) -> str:
+            """Pad left column to list_w when preview is shown."""
+            if not show_preview:
+                return content
+            return _pad_ansi(content, list_w, bg)
 
         out = []
-        out.append("\033[2J\033[H")  # clear + home
+        out.append(f"\033[2J\033[H{bg}")  # clear + home + set bg
+        code_idx = 0
 
-        # Header
-        out.append(f"\033[1m{'─' * min(cols, 60)}\033[0m{NL}")
-        out.append(f"\033[1m Clippy Theme Browser\033[0m  ({len(filtered)} themes){NL}")
-        out.append(f"\033[1m{'─' * min(cols, 60)}\033[0m{NL}")
+        # Header row 0: separator
+        left = f"{accent_fg}\033[1m{'─' * min(list_w if show_preview else cols, 60)}\033[0m"
+        if show_preview:
+            title_right = _pad_ansi(
+                f"{code_bg}{fg}\033[1m Preview\033[0m", preview_w, code_bg
+            )
+            out.append(f"{_left_pad(left)}{bg}{dim_fg}\u2502{title_right}\033[0m{EOL}")
+        else:
+            out.append(f"{left}{EOL}")
+
+        # Header row 1: title
+        left = f"{bg}{fg}\033[1m Clippy Theme Browser\033[0m{bg}{dim_fg}  ({len(filtered)} themes)"
+        code_right = _right_col(code_idx)
+        code_idx += 1
+        out.append(f"{_left_pad(left)}{code_right}{EOL}")
+
+        # Header row 2: separator
+        left = f"{accent_fg}\033[1m{'─' * min(list_w if show_preview else cols, 60)}\033[0m"
+        if show_preview:
+            sep_right = _pad_ansi(
+                f"{code_bg}{demo_theme.sep_fg}{'─' * (preview_w - 2)}", preview_w, code_bg
+            )
+            out.append(f"{_left_pad(left)}{bg}{dim_fg}\u2502{sep_right}\033[0m{EOL}")
+            code_idx += 1
+        else:
+            out.append(f"{left}{EOL}")
 
         # Search bar
         if search_mode:
-            out.append(f" / Search: {search}\033[K{NL}")
+            left = f"{bg}{fg} / Search: {search}"
         elif search:
-            out.append(f" / Search: {search} (press / to edit)\033[K{NL}")
+            left = f"{bg}{fg} / Search: {search}{dim_fg} (press / to edit)"
         else:
-            out.append(f" / to search\033[K{NL}")
+            left = f"{bg}{dim_fg} / to search"
+        code_right = _right_col(code_idx)
+        code_idx += 1
+        out.append(f"{_left_pad(left)}{code_right}{EOL}")
 
         # Theme list
         for i in range(scroll_offset, min(scroll_offset + visible_rows, len(filtered))):
@@ -142,20 +278,31 @@ def _browse_tui(themes: list[Theme], active_name: str | None) -> None:
             is_active = theme.name.lower() == (active_name or "").lower()
             is_cursor = (i == cursor)
             swatch = _render_swatch(theme)
-            marker = " (active)" if is_active else ""
+            marker = f"{dim_fg} (active)" if is_active else ""
 
             if is_cursor:
-                out.append(f"\033[7m > {theme.name:28s}\033[0m {swatch}{marker}\033[K{NL}")
+                left = f"{sel_bg}{fg}\033[1m > {theme.name:28s}\033[0m {swatch}{marker}"
             else:
-                out.append(f"   {theme.name:28s} {swatch}{marker}\033[K{NL}")
+                left = f"{bg}{fg}   {theme.name:28s} {swatch}{marker}"
+            code_right = _right_col(code_idx)
+            code_idx += 1
+            out.append(f"{_left_pad(left)}{code_right}{EOL}")
 
         # Pad remaining rows
         for _ in range(visible_rows - min(visible_rows, len(filtered) - scroll_offset)):
-            out.append(f"\033[K{NL}")
+            code_right = _right_col(code_idx)
+            code_idx += 1
+            out.append(f"{_left_pad('')}{code_right}{EOL}")
 
         # Footer
-        out.append(f"\033[1m{'─' * min(cols, 60)}\033[0m{NL}")
-        out.append(" \033[2m↑↓ navigate  / search  Enter select  q quit\033[0m\033[K")
+        left = f"{accent_fg}\033[1m{'─' * min(list_w if show_preview else cols, 60)}\033[0m"
+        code_right = _right_col(code_idx)
+        code_idx += 1
+        out.append(f"{_left_pad(left)}{code_right}{EOL}")
+
+        left = f"{bg}{dim_fg} ↑↓ navigate  / search  Enter select  q quit\033[0m"
+        code_right = _right_col(code_idx)
+        out.append(f"{_left_pad(left)}{code_right}{bg}\033[K")
 
         sys.stdout.write("".join(out))
         sys.stdout.flush()
@@ -187,7 +334,7 @@ def _browse_tui(themes: list[Theme], active_name: str | None) -> None:
 
     try:
         tty.setraw(fd)
-        _draw()
+        _draw(filtered[cursor] if filtered else themes[0])
 
         while True:
             key = _read_key()
@@ -221,13 +368,15 @@ def _browse_tui(themes: list[Theme], active_name: str | None) -> None:
                         chosen = filtered[cursor]
                         apply_theme(chosen)
                         # Brief flash to confirm
-                        sys.stdout.write(f"\033[2J\033[H\r\n Applied: {chosen.name}\r\n")
+                        cbg = _ansi_bg(*chosen.background)
+                        cfg = _ansi_fg(*chosen.foreground)
+                        sys.stdout.write(f"\033[2J\033[H{cbg}{cfg}\r\n Applied: {chosen.name}\033[0m\r\n")
                         sys.stdout.flush()
                         import time
                         time.sleep(0.5)
                     break
 
-            _draw()
+            _draw(filtered[cursor] if filtered else themes[0])
 
     except (KeyboardInterrupt, EOFError):
         pass
