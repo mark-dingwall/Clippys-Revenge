@@ -11,7 +11,7 @@ set -euo pipefail
 INSTALL_DIR="$HOME/.local/share/clippys-revenge"
 BIN_DIR="$HOME/.local/bin"
 REPO_URL="https://github.com/Axionatic/Clippys-Revenge.git"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd || echo "")"
+SCRIPT_DIR=""
 
 # -- Argument parsing --------------------------------------------------------
 
@@ -23,9 +23,12 @@ for arg in "$@"; do
     esac
 done
 
-if [ "$LOCAL" = true ] && [ -z "$SCRIPT_DIR" ]; then
-    printf '\033[1;31m::\033[0m --from-local requires the script to be run from a file, not piped.\n' >&2
-    exit 1
+if [ "$LOCAL" = true ]; then
+    if [ -z "${BASH_SOURCE[0]:-}" ]; then
+        printf '\033[1;31m::\033[0m --from-local requires the script to be run from a file, not piped.\n' >&2
+        exit 1
+    fi
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 fi
 
 # -- Helpers ----------------------------------------------------------------
@@ -68,18 +71,30 @@ fi
 
 info "Checking dependencies..."
 
+# macOS: Xcode Command Line Tools provide the real python3/git. Without them,
+# /usr/bin/python3 is a stub that pops a GUI installer on first invocation and
+# blocks this script. Fail early with a clear message.
+if [[ "${OSTYPE:-}" == darwin* ]] && ! xcode-select -p >/dev/null 2>&1; then
+    err "Xcode Command Line Tools required on macOS."
+    err "Install with:  xcode-select --install"
+    exit 1
+fi
+
 # Python 3.10+
 if ! command -v python3 &>/dev/null; then
     err "python3 not found. Install Python 3.10+ and try again."
     exit 1
 fi
 
-py_version="$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+py_version="$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])')"
 py_major="${py_version%%.*}"
 py_minor="${py_version##*.}"
 
 if [ "$py_major" -lt 3 ] || { [ "$py_major" -eq 3 ] && [ "$py_minor" -lt 10 ]; }; then
     err "Python 3.10+ required (found $py_version)."
+    if [[ "${OSTYPE:-}" == darwin* ]]; then
+        err "On macOS:  brew install python@3.11"
+    fi
     exit 1
 fi
 ok "Python $py_version"
@@ -202,9 +217,13 @@ case ":$PATH:" in
             *)    rc_file="$HOME/.bashrc" ;;
         esac
         export_line='export PATH="$HOME/.local/bin:$PATH"'
-        answer=""
-        printf '    Add to %s? [Y/n] ' "$rc_file"
-        { read -r answer </dev/tty; } 2>/dev/null || true
+        if [ -t 0 ] || [ -r /dev/tty ]; then
+            answer=""
+            printf '    Add to %s? [Y/n] ' "$rc_file"
+            { read -r answer </dev/tty; } 2>/dev/null || true
+        else
+            answer="n"
+        fi
         case "${answer:-y}" in
             [Yy]*)
                 printf '\n# Added by Clippy'\''s Revenge installer\n%s\n' "$export_line" >> "$rc_file"
